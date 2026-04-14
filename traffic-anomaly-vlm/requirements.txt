@@ -1,0 +1,14 @@
+numpy
+opencv-python
+torch
+torchvision
+transformers
+accelerate
+pydantic
+pyyaml
+tqdm
+matplotlib
+pillow
+scipy
+ultralytics
+pytest

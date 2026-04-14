@@ -1,1 +1,18 @@
-data/
+# Dataset policy: do not upload raw data, keep only label/meta files.
+data/**
+!data/**/
+!data/**/*.txt
+!data/**/*.csv
+!data/**/*.json
+!data/**/*.yaml
+!data/**/*.yml
+
+# Common local/generated artifacts.
+.vscode/
+**/__pycache__/
+*.pyc
+
+# Project artifacts and model weights.
+traffic-anomaly-vlm/outputs/
+traffic-anomaly-vlm/weights/
+traffic_anomaly_vlm/weights/

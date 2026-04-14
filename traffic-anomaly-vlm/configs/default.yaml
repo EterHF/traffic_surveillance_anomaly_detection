@@ -1,0 +1,82 @@
+input_video: "/nvme2/VAD_yemao/data/tad/TAD/frames/abnormal/01_Accident_001.mp4"
+
+video:
+  input_fps: 30
+  fps_sample: 30
+  resize_max_side: 1280
+  resize_interpolation: "area"
+  window_size: 16
+  window_step: 4
+
+perception:
+  yolo_model: "weights/yolo26n.pt"
+  tracker: "bytetrack.yaml"
+  conf: 0.25
+  iou: 0.5
+  classes: [0, 1, 2, 3, 5, 7]
+
+vlm:
+  enable: false
+  model_path: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/qwen3-vl-4bi"
+  device: "cuda"
+  dtype: "float16"
+  max_new_tokens: 4096
+
+pure_vlm_baseline:
+  window_size: 60
+  window_stride: 45
+  max_stride_ratio: 0.75
+  chunks_per_window: 4
+  sampled_frames_per_chunk: 4
+  max_image_size: 640
+  smoothing_mode: "savgol"
+  savgol_window: 11
+  savgol_polyorder: 2
+  ma_window: 9
+  threshold: 0.5
+  min_interval_len: 10
+  merge_gap: 8
+
+features:
+  clip:
+    model_name: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/clip-vit-base-patch32"
+    model_revision: ""
+    device: "cuda"
+    batch_size: 24
+    resize_long_side: 640
+    resize_interpolation: "area"
+  raft:
+    root: "/nvme2/VAD_yemao/traffic-anomaly-vlm/src/features/RAFT"
+    weights: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/raft/raft-things.pth"
+    device: "cuda"
+    iters: 12
+    resize_long_side: 640
+    resize_interpolation: "area"
+    flow_proj_dim: 128
+    flow_proj_seed: 42
+
+output:
+  save_assets: true
+  save_json: true
+  output_dir: "outputs"
+
+components:
+  track_cache:
+    # null means auto: max(64, window_size * 4)
+    max_frames: null
+
+  feature_cache:
+    # null means unbounded (keep all windows)
+    max_windows: null
+
+  boundary_detector:
+    high: 1.0
+    low: 0.5
+
+  proposal_refiner:
+    min_len_frames: 8
+    merge_gap_frames: 8
+    buffer_frames: 2
+
+  evidence_builder:
+    assets_subdir: "assets"

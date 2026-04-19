@@ -17,6 +17,9 @@ class TrackObject(BaseModel):
     w: float
     h: float
     area: float
+    # Optional frame size, filled by parser when available.
+    frame_w: float = 0.0
+    frame_h: float = 0.0
 
 
 class WindowFeature(BaseModel):

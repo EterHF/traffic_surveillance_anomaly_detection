@@ -10,6 +10,11 @@ def parse_ultralytics_results(results, frame_id: int) -> list[TrackObject]:
         if boxes is None or boxes.id is None:
             continue
 
+        frame_h, frame_w = 0.0, 0.0
+        if hasattr(r, "orig_shape") and r.orig_shape is not None and len(r.orig_shape) >= 2:
+            frame_h = float(r.orig_shape[0])
+            frame_w = float(r.orig_shape[1])
+
         for box, tid in zip(boxes, boxes.id):
             xyxy = box.xyxy[0].cpu().numpy().tolist()
             conf = float(box.conf[0].cpu().numpy())
@@ -35,6 +40,8 @@ def parse_ultralytics_results(results, frame_id: int) -> list[TrackObject]:
                     w=w,
                     h=h,
                     area=w * h,
+                    frame_w=frame_w,
+                    frame_h=frame_h,
                 )
             )
     return out

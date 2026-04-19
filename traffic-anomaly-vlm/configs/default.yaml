@@ -1,12 +1,12 @@
 input_video: "/nvme2/VAD_yemao/data/tad/TAD/frames/abnormal/01_Accident_001.mp4"
 
 video:
-  input_fps: 30
-  fps_sample: 30
-  resize_max_side: 1280
+  input_fps: 25
+  fps_sample: 25
+  resize_max_side: 640
   resize_interpolation: "area"
-  window_size: 16
-  window_step: 4
+  window_size: 4
+  window_step: 1
 
 perception:
   yolo_model: "weights/yolo26n.pt"
@@ -14,6 +14,11 @@ perception:
   conf: 0.25
   iou: 0.5
   classes: [0, 1, 2, 3, 5, 7]
+  track_refiner:
+    enable: true
+    max_gap: 8
+    max_center_dist: 0.06
+    max_size_ratio: 2.5
 
 vlm:
   enable: false
@@ -38,6 +43,10 @@ pure_vlm_baseline:
   merge_gap: 8
 
 features:
+  track:
+    fit_degree: 2
+    # null means use current window_size
+    history_len: null
   clip:
     model_name: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/clip-vit-base-patch32"
     model_revision: ""
@@ -70,8 +79,8 @@ components:
     max_windows: null
 
   boundary_detector:
-    high: 1.0
-    low: 0.5
+    high: null
+    low: null
 
   proposal_refiner:
     min_len_frames: 8

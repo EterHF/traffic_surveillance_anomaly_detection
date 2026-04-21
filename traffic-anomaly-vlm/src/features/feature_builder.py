@@ -5,6 +5,49 @@ from src.features.track_features import build_track_features
 from src.schemas import WindowFeature
 
 
+TRACK_RISK_WEIGHTS = {
+    "dir_turn_rates_sum": 0.25,
+    "pred_center_sum_err": 0.25,
+    "pred_iou_sum_err": 0.25,
+    "speed_turn_rates_sum": 0.25,
+    "turn_active_ratio": 0.25,
+}
+
+OBJECT_PRIOR_WEIGHTS = {
+    "collision_warning": 0.45,
+    "pred_center_max_err": 0.20,
+    "pred_iou_max_err": 0.15,
+    "turn_active_ratio": 0.10,
+    "disappear_far_sum": 0.10,
+}
+
+SCENE_CONTEXT_WEIGHTS = {
+    "count_std": 0.30,
+    "count_delta": 0.20,
+    "density_std": 0.30,
+    "density_delta": 0.20,
+}
+
+
+def _weighted_sum(features: dict[str, float], weights: dict[str, float]) -> float:
+    score = 0.0
+    for key, weight in weights.items():
+        score += float(features.get(key, 0.0)) * float(weight)
+    return float(score)
+
+
+def compute_track_risk_score(features: dict[str, float]) -> float:
+    return _weighted_sum(features, TRACK_RISK_WEIGHTS)
+
+
+def compute_object_prior_score(features: dict[str, float]) -> float:
+    return _weighted_sum(features, OBJECT_PRIOR_WEIGHTS)
+
+
+def compute_scene_context_score(features: dict[str, float]) -> float:
+    return _weighted_sum(features, SCENE_CONTEXT_WEIGHTS)
+
+
 class FeatureBuilder:
     def __init__(
         self,
@@ -30,33 +73,20 @@ class FeatureBuilder:
         )
         scene_feats = build_scene_features(track_window)
         merged = {**track_feats, **scene_feats}
-
-        selected_keys = [
-            "dir_turn_rates_sum",
-            "pred_center_sum_err",
-            "pred_iou_sum_err",
-            "speed_turn_rates_sum",
-            "turn_active_ratio"
-        ]
-        weights = {
-            "dir_turn_rates_sum": 0.25,
-            "pred_center_sum_err": 0.25,
-            "pred_iou_sum_err": 0.25,
-            "speed_turn_rates_sum": 0.25,
-            "turn_active_ratio": 0.25,
-        }
-        trigger_score = 0.0
-        for key in selected_keys:
-            val = merged.get(key, 0.0)
-            weight = weights.get(key, 0.0)
-            trigger_score += val * weight
+        track_risk_score = compute_track_risk_score(merged)
+        object_prior_score = compute_object_prior_score(merged)
+        scene_context_score = compute_scene_context_score(merged)
+        merged["track_risk_score"] = float(track_risk_score)
+        merged["object_prior_score"] = float(object_prior_score)
+        merged["scene_context_score"] = float(scene_context_score)
 
         wf = WindowFeature(
             window_id=self.window_id,
             start_frame=frame_ids[0],
             end_frame=frame_ids[-1],
             feature_dict=merged,
-            trigger_score=float(trigger_score),
+            # Keep trigger_score backward-compatible for the existing track branch.
+            trigger_score=float(track_risk_score),
         )
         self.window_id += 1
         return wf

@@ -19,8 +19,8 @@ from src.features.track_features import build_track_features
 from src.perception.detector_tracker import DetectorTracker
 from src.perception.track_parser import parse_ultralytics_results
 from src.perception.track_refiner import refine_track_ids
+from src.proposals.boundary_detector import BoundaryDetector
 from src.settings import load_settings
-from src.triggers.boundary import BoundaryDetector
 
 
 def list_frame_paths(frame_dir: str) -> list[str]:
@@ -227,8 +227,19 @@ def run(args: argparse.Namespace) -> None:
     detector = BoundaryDetector(
         high=getattr(boundary_cfg, "high", None) if boundary_cfg is not None else None,
         low=getattr(boundary_cfg, "low", None) if boundary_cfg is not None else None,
+        online=bool(getattr(boundary_cfg, "online", False)) if boundary_cfg is not None else False,
+        use_savgol_filter=bool(getattr(boundary_cfg, "use_savgol_filter", False)) if boundary_cfg is not None else False,
+        method=str(getattr(boundary_cfg, "method", "by_peeks")) if boundary_cfg is not None else "by_peeks",
+        high_z=float(getattr(boundary_cfg, "high_z", 1.0)) if boundary_cfg is not None else 1.0,
+        low_z=float(getattr(boundary_cfg, "low_z", 0.5)) if boundary_cfg is not None else 0.5,
+        factor_online=float(getattr(boundary_cfg, "factor_online", 0.3)) if boundary_cfg is not None else 0.3,
+        peak_gap=int(getattr(boundary_cfg, "peak_gap", 5)) if boundary_cfg is not None else 5,
+        peak_expand=tuple(getattr(boundary_cfg, "peak_expand", [12, 25])) if boundary_cfg is not None else (12, 25),
+        min_span_len=int(getattr(boundary_cfg, "min_span_len", 12)) if boundary_cfg is not None else 12,
+        merge_gap=int(getattr(boundary_cfg, "merge_gap", 25)) if boundary_cfg is not None else 25,
     )
-    det_intervals = detector.detect(track_score_final.astype(np.float32).tolist())
+    det_raw = detector.detect(track_score_final.astype(np.float32).tolist())
+    det_intervals = det_raw if isinstance(det_raw, list) else []
     det_peaks: list[tuple[int, int, float]] = []
     for s, e in det_intervals:
         if s > e or s < 0 or e >= int(frame_ids_np.size):
@@ -248,7 +259,11 @@ def run(args: argparse.Namespace) -> None:
         peak_y = [float(v) for _, _, v in det_peaks]
         ax.scatter(peak_x, peak_y, color="black", s=20, zorder=5, label="detected_peaks")
         ax.legend(loc="upper right")
-    ax.set_title("Final Track Anomaly Score (weighted sum of selected components)")
+    ax.set_title(
+        "Final Track Anomaly Score "
+        f"(boundary={str(getattr(boundary_cfg, 'method', 'by_peeks'))}, "
+        f"savgol={bool(getattr(boundary_cfg, 'use_savgol_filter', False)) if boundary_cfg is not None else False})"
+    )
     ax.set_xlabel("frame_id")
     ax.set_ylabel("anomaly_score")
     fig.tight_layout()
@@ -281,6 +296,20 @@ def run(args: argparse.Namespace) -> None:
             }
             for s, p, v in det_peaks
         ],
+        "boundary_detector": {
+            "method": str(getattr(boundary_cfg, "method", "by_peeks")) if boundary_cfg is not None else "by_peeks",
+            "high": getattr(boundary_cfg, "high", None) if boundary_cfg is not None else None,
+            "low": getattr(boundary_cfg, "low", None) if boundary_cfg is not None else None,
+            "online": bool(getattr(boundary_cfg, "online", False)) if boundary_cfg is not None else False,
+            "use_savgol_filter": bool(getattr(boundary_cfg, "use_savgol_filter", False)) if boundary_cfg is not None else False,
+            "high_z": float(getattr(boundary_cfg, "high_z", 1.0)) if boundary_cfg is not None else 1.0,
+            "low_z": float(getattr(boundary_cfg, "low_z", 0.5)) if boundary_cfg is not None else 0.5,
+            "factor_online": float(getattr(boundary_cfg, "factor_online", 0.3)) if boundary_cfg is not None else 0.3,
+            "peak_gap": int(getattr(boundary_cfg, "peak_gap", 5)) if boundary_cfg is not None else 5,
+            "peak_expand": list(getattr(boundary_cfg, "peak_expand", [12, 25])) if boundary_cfg is not None else [12, 25],
+            "min_span_len": int(getattr(boundary_cfg, "min_span_len", 12)) if boundary_cfg is not None else 12,
+            "merge_gap": int(getattr(boundary_cfg, "merge_gap", 25)) if boundary_cfg is not None else 25,
+        },
         "paths": {
             "track_components": track_plot_paths,
             "scene_components": scene_plot_paths,

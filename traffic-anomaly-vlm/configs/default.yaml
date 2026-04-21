@@ -47,6 +47,20 @@ features:
     fit_degree: 2
     # null means use current window_size
     history_len: null
+  eventness:
+    use_clip: false
+    use_raft: false
+    use_lowres: true
+    use_track_layout: true
+    lowres_size: 32
+    occupancy_grid: 4
+    smooth_window: 9
+    smooth_polyorder: 2
+    clip_weight: 0.45
+    raft_weight: 0.15
+    lowres_weight: 0.20
+    track_weight: 0.20
+    signal_weight: 0.30
   clip:
     model_name: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/clip-vit-base-patch32"
     model_revision: ""
@@ -79,8 +93,16 @@ components:
     max_windows: null
 
   boundary_detector:
-    high: null
-    low: null
+    online: false
+    use_savgol_filter: false
+    method: "by_peeks" # ["by_peeks", "by_thres"]
+    high_z: 3.0
+    low_z: 1.0
+    factor_online: 0.3
+    peak_gap: 5
+    peak_expand: [12, 25] 
+    min_span_len: 12
+    merge_gap: 25
 
   proposal_refiner:
     min_len_frames: 8
@@ -89,3 +111,20 @@ components:
 
   evidence_builder:
     assets_subdir: "assets"
+
+  event_tree:
+    max_depth: 2
+    min_span_len: 8
+    split_min_len: 20
+    peak_gap: 4
+    peak_expand: [4, 8]
+    merge_gap: 4
+    per_level_high_z: [0.9, 0.55]
+    use_savgol_filter: false
+
+  node_selector:
+    top_k: 6
+    min_node_len: 8
+    overlap_iou: 0.85
+    gate_floor: 0.55
+    reference_span: 96

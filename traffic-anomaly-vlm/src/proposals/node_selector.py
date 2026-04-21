@@ -73,20 +73,32 @@ def score_event_nodes(
         node.eventness_mean = float(event_top_mean)
         span_len = max(1, int(node.span_len()))
         compactness = min(1.0, np.sqrt(max(1.0, float(reference_span)) / float(span_len)))
-        node.fused_score = float(event_strength * (gate_floor + (1.0 - gate_floor) * risk_strength) * compactness)
+        if node.route_temporal_pattern == "sustained":
+            compactness = max(compactness, 0.85)
+
+        route_factor = 1.0
+        role = str(node.route_role or "").strip().lower()
+        route_conf = min(max(float(node.route_confidence), 0.0), 1.0)
+        if role == "core":
+            route_factor = 1.0 + 0.25 * route_conf
+        elif role == "transition":
+            route_factor = 0.82
+        elif role == "context":
+            route_factor = 0.45
+
+        node.fused_score = float(event_strength * (gate_floor + (1.0 - gate_floor) * risk_strength) * compactness * route_factor)
         scored.append(node)
     return scored
 
 
-def select_salient_nodes(
-    root: EventNode,
+def select_nodes_from_list(
+    nodes: list[EventNode],
     eventness_scores: list[float] | np.ndarray,
     track_risk_scores: list[float] | np.ndarray,
     object_prior_scores: list[float] | np.ndarray | None = None,
     cfg: NodeSelectorConfig | None = None,
 ) -> list[EventNode]:
     cfg = cfg or NodeSelectorConfig()
-    nodes = flatten_event_tree(root, include_root=False)
     nodes = [n for n in nodes if n.span_len() >= int(cfg.min_node_len)]
     if not nodes:
         return []
@@ -119,3 +131,20 @@ def select_salient_nodes(
         if len(selected) >= int(cfg.top_k):
             break
     return selected
+
+
+def select_salient_nodes(
+    root: EventNode,
+    eventness_scores: list[float] | np.ndarray,
+    track_risk_scores: list[float] | np.ndarray,
+    object_prior_scores: list[float] | np.ndarray | None = None,
+    cfg: NodeSelectorConfig | None = None,
+) -> list[EventNode]:
+    nodes = flatten_event_tree(root, include_root=False)
+    return select_nodes_from_list(
+        nodes,
+        eventness_scores=eventness_scores,
+        track_risk_scores=track_risk_scores,
+        object_prior_scores=object_prior_scores,
+        cfg=cfg,
+    )

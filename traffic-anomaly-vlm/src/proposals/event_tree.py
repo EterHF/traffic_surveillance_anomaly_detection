@@ -32,6 +32,9 @@ class EventNode:
     eventness_peak: float
     eventness_mean: float
     fused_score: float = 0.0
+    route_role: str = ""
+    route_temporal_pattern: str = ""
+    route_confidence: float = 0.0
     children: list["EventNode"] = field(default_factory=list)
 
     def span_len(self) -> int:
@@ -50,6 +53,9 @@ class EventNode:
             "eventness_peak": float(self.eventness_peak),
             "eventness_mean": float(self.eventness_mean),
             "fused_score": float(self.fused_score),
+            "route_role": str(self.route_role),
+            "route_temporal_pattern": str(self.route_temporal_pattern),
+            "route_confidence": float(self.route_confidence),
             "children": [child.to_dict() for child in self.children],
         }
 
@@ -212,6 +218,25 @@ def build_event_tree(
     )
     root.children = _split_children(root, frame_ids, scores, cfg, level=1)
     return root
+
+
+def make_event_node_from_span(
+    node_id: str,
+    level: int,
+    start_idx: int,
+    end_idx: int,
+    frame_ids: list[int],
+    eventness_scores: list[float] | np.ndarray,
+) -> EventNode:
+    scores = np.asarray(eventness_scores, dtype=np.float32)
+    return _node_from_span(
+        node_id=node_id,
+        level=level,
+        start_idx=int(start_idx),
+        end_idx=int(end_idx),
+        frame_ids=frame_ids,
+        eventness_scores=scores,
+    )
 
 
 def flatten_event_tree(root: EventNode, include_root: bool = False) -> list[EventNode]:

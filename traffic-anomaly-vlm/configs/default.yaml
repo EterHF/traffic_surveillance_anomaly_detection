@@ -128,3 +128,47 @@ components:
     overlap_iou: 0.85
     gate_floor: 0.55
     reference_span: 96
+
+  coarse_proposal:
+    interval_high_z: 0.85
+    interval_peak_gap: 4
+    interval_peak_expand: [10, 18]
+    interval_min_span_len: 12
+    interval_merge_gap: 10
+    tree_max_depth: 1
+    tree_min_span_len: 8
+    tree_split_min_len: 20
+    tree_peak_gap: 4
+    tree_peak_expand: [4, 8]
+    tree_merge_gap: 4
+    tree_high_z: [0.9]
+    merge_iou: 0.4
+    merge_center_gap: 20
+    max_proposals: 8
+
+  coarse_router:
+    enabled: false
+    mode: "heuristic"  # ["heuristic", "vlm"]
+    max_nodes: 4
+    max_new_tokens: 256
+    max_image_size: 640
+    min_confidence: 0.35
+
+  fine_tree:
+    min_output_span: 8
+    focus_region_pad: 0.10
+    localized_high_z: [0.8, 0.45]
+    localized_split_min_len: 12
+    localized_peak_gap: 3
+    localized_peak_expand: [2, 5]
+    localized_merge_gap: 3
+    multi_stage_high_z: [0.75, 0.42]
+    multi_stage_split_min_len: 10
+    multi_stage_peak_gap: 3
+    multi_stage_peak_expand: [2, 4]
+    multi_stage_merge_gap: 2
+    uncertain_high_z: [0.9, 0.55]
+    uncertain_split_min_len: 16
+    uncertain_peak_gap: 4
+    uncertain_peak_expand: [4, 8]
+    uncertain_merge_gap: 4

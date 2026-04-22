@@ -1,92 +1,131 @@
 from __future__ import annotations
 
-from src.features.scene_features import build_scene_features
-from src.features.track_features import build_track_features
+import numpy as np
+
+from src.features.feature_components.scene import SceneFeatureConfig, SceneFeatureExtractor
+from src.features.feature_components.track import build_track_features
 from src.schemas import WindowFeature
 
 
-TRACK_RISK_WEIGHTS = {
-    "dir_turn_rates_sum": 0.25,
-    "pred_center_sum_err": 0.25,
-    "pred_iou_sum_err": 0.25,
-    "speed_turn_rates_sum": 0.25,
-    "turn_active_ratio": 0.25,
-}
-
-OBJECT_PRIOR_WEIGHTS = {
-    "collision_warning": 0.45,
-    "pred_center_max_err": 0.20,
-    "pred_iou_max_err": 0.15,
-    "turn_active_ratio": 0.10,
+OBJECT_FEATURE_WEIGHTS = {
+    "dir_turn_rates_sum": 0.5,
+    "pred_center_sum_err": 0.5,
+    "pred_iou_sum_err": 0.5,
+    "speed_turn_rates_sum": 0.5,
+    "turn_active_ratio": 0.5,
+    "collision_warning": 0.0,
+    "pred_center_max_err": 0.0,
+    "pred_iou_max_err": 0.0,
     "disappear_far_sum": 0.10,
 }
 
-SCENE_CONTEXT_WEIGHTS = {
-    "count_std": 0.30,
-    "count_delta": 0.20,
-    "density_std": 0.30,
-    "density_delta": 0.20,
+SCENE_FEATURE_WEIGHTS = {
+    "count_std": 0.0,
+    "count_delta": 0.0,
+    "density_std": 0.0,
+    "density_delta": 0.0,
+    "lowres_eventness": 0.20,
+    "track_layout_eventness": 0.20,
+    "clip_eventness": 0.0,
+    "raft_eventness": 0.0, # FIXME
+}
+
+TRIGGER_BRANCH_WEIGHTS = {
+    "object_score": 0.5,
+    "scene_score": 0.5,
 }
 
 
-def _weighted_sum(features: dict[str, float], weights: dict[str, float]) -> float:
-    score = 0.0
-    for key, weight in weights.items():
-        score += float(features.get(key, 0.0)) * float(weight)
-    return float(score)
+def _normalized_weighted_sum(features: dict[str, float], weights: dict[str, float]) -> float:
+    valid = {key: float(weight) for key, weight in weights.items() if float(weight) > 0.0}
+    if not valid:
+        return 0.0
+    weight_sum = sum(valid.values())
+    score = sum(float(features.get(key, 0.0)) * weight for key, weight in valid.items())
+    return float(score / max(1e-6, weight_sum))
 
 
-def compute_track_risk_score(features: dict[str, float]) -> float:
-    return _weighted_sum(features, TRACK_RISK_WEIGHTS)
+def compute_object_score(features: dict[str, float]) -> float:
+    return _normalized_weighted_sum(features, OBJECT_FEATURE_WEIGHTS)
 
 
-def compute_object_prior_score(features: dict[str, float]) -> float:
-    return _weighted_sum(features, OBJECT_PRIOR_WEIGHTS)
-
-
-def compute_scene_context_score(features: dict[str, float]) -> float:
-    return _weighted_sum(features, SCENE_CONTEXT_WEIGHTS)
+def compute_scene_score(features: dict[str, float], scene_cfg: SceneFeatureConfig) -> float:
+    return _normalized_weighted_sum(features, SCENE_FEATURE_WEIGHTS)
 
 
 class FeatureBuilder:
+    """Build flat object/scene trigger scores for each offline window."""
+
     def __init__(
         self,
         window_size: int,
         window_step: int,
         track_fit_degree: int = 2,
         track_history_len: int | None = None,
+        scene_cfg: SceneFeatureConfig | None = None,
     ):
         self.window_size = window_size
         self.window_step = window_step
         self.track_fit_degree = int(track_fit_degree)
         self.track_history_len = track_history_len
+        self.scene_cfg = scene_cfg or SceneFeatureConfig()
+        self.scene_extractor = SceneFeatureExtractor(self.scene_cfg)
         self.window_id = 0
 
-    def ready(self, frame_ids: list[int], track_window: list[list]) -> bool:
+    def ready(
+        self,
+        frame_ids: list[int],
+        track_window: list[list],
+        image_window: list[np.ndarray] | None = None,
+    ) -> bool:
+        if image_window is not None and len(image_window) < self.window_size:
+            return False
         return len(frame_ids) >= self.window_size and len(track_window) >= self.window_size
 
-    def build(self, frame_ids: list[int], track_window: list[list]) -> WindowFeature:
+    def build(
+        self,
+        frame_ids: list[int],
+        track_window: list[list],
+        image_window: list[np.ndarray] | None = None,
+        scene_pair_slices: dict[str, np.ndarray] | None = None,
+    ) -> WindowFeature:
         track_feats = build_track_features(
             track_window,
             fit_degree=self.track_fit_degree,
             history_len=self.track_history_len,
         )
-        scene_feats = build_scene_features(track_window)
+        scene_feats = self.scene_extractor.compute(
+            track_window,
+            images_bgr=image_window,
+            lowres_weight=SCENE_FEATURE_WEIGHTS["lowres_eventness"],
+            layout_weight=SCENE_FEATURE_WEIGHTS["track_layout_eventness"],
+            clip_weight=SCENE_FEATURE_WEIGHTS["clip_eventness"],
+            raft_weight=SCENE_FEATURE_WEIGHTS["raft_eventness"],
+            lowres_pair=(scene_pair_slices or {}).get("lowres_pair"),
+            layout_pair=(scene_pair_slices or {}).get("layout_pair"),
+            clip_pair=(scene_pair_slices or {}).get("clip_pair"),
+            raft_pair=(scene_pair_slices or {}).get("raft_pair"),
+        )
         merged = {**track_feats, **scene_feats}
-        track_risk_score = compute_track_risk_score(merged)
-        object_prior_score = compute_object_prior_score(merged)
-        scene_context_score = compute_scene_context_score(merged)
-        merged["track_risk_score"] = float(track_risk_score)
-        merged["object_prior_score"] = float(object_prior_score)
-        merged["scene_context_score"] = float(scene_context_score)
+        object_score = compute_object_score(merged)
+        scene_score = compute_scene_score(merged, self.scene_cfg)
+        trigger_score = _normalized_weighted_sum(
+            {
+                "object_score": object_score,
+                "scene_score": scene_score,
+            },
+            TRIGGER_BRANCH_WEIGHTS,
+        )
+        merged["object_score"] = float(object_score)
+        merged["scene_score"] = float(scene_score)
+        merged["trigger_score"] = float(trigger_score)
 
         wf = WindowFeature(
             window_id=self.window_id,
             start_frame=frame_ids[0],
             end_frame=frame_ids[-1],
             feature_dict=merged,
-            # Keep trigger_score backward-compatible for the existing track branch.
-            trigger_score=float(track_risk_score),
+            trigger_score=float(trigger_score),
         )
         self.window_id += 1
         return wf

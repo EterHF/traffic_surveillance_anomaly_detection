@@ -15,4 +15,5 @@ data/**
 # Project artifacts and model weights.
 traffic-anomaly-vlm/outputs/
 traffic-anomaly-vlm/weights/
-traffic_anomaly_vlm/weights/
+traffic_anomaly_vlm/tmp/
+traffic_anomaly_vlm/tests/

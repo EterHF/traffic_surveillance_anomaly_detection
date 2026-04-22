@@ -1,222 +1,254 @@
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 from typing import Any
-
 import cv2
+import numpy as np
+from tqdm.auto import tqdm
 
-from src.core.logger import get_logger
-from src.core.sampler import FrameSampler
+from src.schemas import EventNode, TrackObject, WindowFeature
+from src.settings import load_settings, instantiate_from_config
+from src.core.utils import get_logger
 from src.core.video_io import build_reader
-from src.evidence.builder import EvidenceBuilder
-from src.features.feature_builder import FeatureBuilder
-from src.features.feature_cache import FeatureCache
+from src.core.sampler import FrameSampler
+from src.perception.track_parser import parse_ultralytics_results
+
 from src.perception.detector_tracker import DetectorTracker
 from src.perception.track_refiner import refine_track_ids
-from src.perception.track_cache import TrackCache
-from src.perception.track_parser import parse_ultralytics_results
-from src.proposals.main_object import select_main_object
-from src.proposals.proposal_refiner import ProposalRefiner
-from src.proposals.start_time import refine_start_time
-from src.schemas import FinalResult, TrackObject, VLMResult
-from src.triggers.boundary import BoundaryDetector
-from src.triggers.event_builder import EventBuilder
+from src.features.feature_builder import FeatureBuilder, SCENE_FEATURE_WEIGHTS
+from src.vlm.model_loader import LocalVLM
+from src.proposals.boundary_detector import BoundaryDetector
+from src.proposals.tree_pipeline import TreePipeline
+
+from src.eval.visualize import plot_scores
+
+
+def _safe_float(value: Any, default: float) -> float:
+    if value is None:
+        return float(default)
+    if isinstance(value, str):
+        value = value.strip().rstrip(",")
+    return float(value)
 
 
 class Orchestrator:
-    def __init__(self, cfg):
-        self.cfg = cfg
+    def __init__(self, cfg_path: str):
+        # Load settings
+        self.cfg = load_settings(cfg_path)
+        self.cfg_instances = instantiate_from_config(self.cfg)
         self.logger = get_logger()
 
-        components = getattr(cfg, "components", None)
-        track_cache_cfg = getattr(components, "track_cache", None) if components else None
-        feature_cache_cfg = getattr(components, "feature_cache", None) if components else None
-        boundary_cfg = getattr(components, "boundary_detector", None) if components else None
-        refiner_cfg = getattr(components, "proposal_refiner", None) if components else None
-        evidence_cfg = getattr(components, "evidence_builder", None) if components else None
+        # Output dir
+        self.output_dir = Path(self.cfg.output.output_dir)
+        self.assets_dir = self.output_dir / self.cfg.evidence_builder.assets_subdir
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir = self.output_dir / "results"
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        self.detector_tracker = DetectorTracker(
-            model_path=cfg.perception.yolo_model,
-            tracker=cfg.perception.tracker,
-            conf=cfg.perception.conf,
-            iou=cfg.perception.iou,
-            classes=list(cfg.perception.classes),
-        )
-
-        auto_track_frames = max(64, int(cfg.video.window_size * 4))
-        track_max_frames = getattr(track_cache_cfg, "max_frames", None)
-        if track_max_frames is None:
-            track_max_frames = auto_track_frames
-        else:
-            track_max_frames = max(int(track_max_frames), int(cfg.video.window_size))
-        self.track_cache_max_frames = int(track_max_frames)
-        self.track_cache = TrackCache(max_frames=track_max_frames)
-
-        track_feat_cfg = getattr(getattr(cfg, "features", None), "track", None)
-        track_fit_degree = int(getattr(track_feat_cfg, "fit_degree", 2)) if track_feat_cfg is not None else 2
-        track_history_len_raw = getattr(track_feat_cfg, "history_len", None) if track_feat_cfg is not None else None
-        track_history_len = int(track_history_len_raw) if track_history_len_raw is not None else None
+        # Initialize components
+        detector_cfg = self.cfg_instances.get("perception") or self.cfg_instances.get("detector_tracker")
+        self.detector_tracker = DetectorTracker(detector_cfg)
         self.feature_builder = FeatureBuilder(
-            cfg.video.window_size,
-            cfg.video.window_step,
-            track_fit_degree=track_fit_degree,
-            track_history_len=track_history_len,
+            self.cfg.video.window_size,
+            self.cfg.video.window_step,
+            self.cfg.track_features.fit_degree,
+            self.cfg.track_features.history_len,
+            self.cfg_instances.get("scene_features"),
         )
-        feature_max_windows = getattr(feature_cache_cfg, "max_windows", None)
-        if feature_max_windows is not None:
-            feature_max_windows = int(feature_max_windows)
-            if feature_max_windows <= 0:
-                feature_max_windows = None
-        self.feature_cache_max_windows = feature_max_windows
-        self.feature_cache = FeatureCache(max_windows=feature_max_windows)
+        self.enable_track_refine = bool(getattr(self.cfg.track_refiner, "enable", False))
+        self.track_refiner_params: dict[str, Any] = {}
+        if self.enable_track_refine:
+            self.track_refiner_params = {
+                "max_frame_gap": self.cfg.track_refiner.max_frame_gap,
+                "max_center_dist": self.cfg.track_refiner.max_center_dist,
+                "max_size_ratio": self.cfg.track_refiner.max_size_ratio,
+                "min_direction_cos": self.cfg.track_refiner.min_direction_cos,
+                "max_speed_ratio": self.cfg.track_refiner.max_speed_ratio,
+                "gap_relax_factor": self.cfg.track_refiner.gap_relax_factor,
+            }
 
-        track_refiner_cfg = getattr(getattr(cfg, "perception", None), "track_refiner", None)
-        self.track_refiner_enable = bool(getattr(track_refiner_cfg, "enable", track_refiner_cfg is not None))
-        self.track_refiner_max_gap = int(getattr(track_refiner_cfg, "max_gap", 8)) if track_refiner_cfg is not None else 8
-        self.track_refiner_max_center_dist = (
-            float(getattr(track_refiner_cfg, "max_center_dist", 0.06)) if track_refiner_cfg is not None else 0.06
+        self.boundary_detector_cfg = self.cfg_instances.get("boundary_detector")
+        self.tree_build_cfg = self.cfg_instances.get("tree_build_config") or self.cfg_instances.get("tree_build")
+        self.vlm = LocalVLM(self.cfg_instances.get("vlm"))
+        self.tree_method = str(getattr(self.cfg.evidence_builder, "method", "montage"))
+        self.tree_pipeline = TreePipeline(
+            self.vlm,
+            self.tree_build_cfg,
+            self.boundary_detector_cfg,
+            _safe_float(getattr(self.cfg.tree_refine_config, "min_confidence", 0.35), 0.35),
+            _safe_float(getattr(self.cfg.tree_refine_config, "prior_weight", 0.4), 0.4),
+            _safe_float(getattr(self.cfg.tree_refine_config, "vlm_weight", 0.6), 0.6),
+            str(self.assets_dir),
         )
-        self.track_refiner_max_size_ratio = (
-            float(getattr(track_refiner_cfg, "max_size_ratio", 2.5)) if track_refiner_cfg is not None else 2.5
+        self.logger.info("Orchestrator initialized with config: %s", cfg_path)
+
+    def _build_window_features(
+        self,
+        sampled_frame_ids: list[int],
+        sampled_frame_paths: list[str],
+        sampled_tracks: list[list[TrackObject]],
+    ) -> tuple[list[Any], list[float]]:
+        window_size = max(1, int(self.cfg.video.window_size))
+        window_step = max(1, int(self.cfg.video.window_step))
+
+        frame_window: deque[int] = deque(maxlen=window_size)
+        track_window: deque[list[TrackObject]] = deque(maxlen=window_size)
+        image_window: deque[Any] = deque(maxlen=window_size)
+        scene_pair_cache = self._precompute_scene_pair_cache(sampled_frame_paths, sampled_tracks)
+        need_window_images = False
+
+        windows = []
+        for idx, (frame_id, frame_path, tracks) in enumerate(
+            zip(sampled_frame_ids, sampled_frame_paths, sampled_tracks)
+        ):
+            frame_window.append(int(frame_id))
+            track_window.append(tracks)
+            if len(frame_window) < window_size:
+                continue
+
+            window_start = idx + 1 - window_size
+            if window_start % window_step != 0:
+                continue
+
+            wf = self.feature_builder.build(
+                frame_ids=list(frame_window),
+                track_window=list(track_window),
+                image_window=list(image_window) if need_window_images else None,
+                scene_pair_slices={
+                    "lowres_pair": scene_pair_cache["lowres_pair"][window_start:idx],
+                    "layout_pair": scene_pair_cache["layout_pair"][window_start:idx],
+                    "clip_pair": scene_pair_cache["clip_pair"][window_start:idx],
+                    "raft_pair": scene_pair_cache["raft_pair"][window_start:idx],
+                },
+            )
+            windows.append(wf)
+
+        # FIXME: Assume window_step == 1
+        scores = [windows[0].trigger_score] * (window_size - 1) # FIXME: temporarily pad first window score
+        scores += [float(window.trigger_score) for window in windows]
+        return windows, scores
+
+    def _precompute_scene_pair_cache(
+        self,
+        sampled_frame_paths: list[str],
+        sampled_tracks: list[list[TrackObject]],
+    ) -> dict[str, np.ndarray]:
+        need_images = bool(
+            SCENE_FEATURE_WEIGHTS.get("lowres_eventness", 0.0) > 0.0
+            or SCENE_FEATURE_WEIGHTS.get("clip_eventness", 0.0) > 0.0
+            or SCENE_FEATURE_WEIGHTS.get("raft_eventness", 0.0) > 0.0
         )
-        self.track_refiner_min_direction_cos = (
-            float(getattr(track_refiner_cfg, "min_direction_cos", -0.1)) if track_refiner_cfg is not None else -0.1
-        )
-        self.track_refiner_max_speed_ratio = (
-            float(getattr(track_refiner_cfg, "max_speed_ratio", 3.5)) if track_refiner_cfg is not None else 3.5
-        )
-        self.track_refiner_gap_relax_factor = (
-            float(getattr(track_refiner_cfg, "gap_relax_factor", 0.2)) if track_refiner_cfg is not None else 0.2
+        images_bgr: list[np.ndarray] | None = None
+        if need_images and sampled_frame_paths:
+            images_bgr = []
+            for frame_path in sampled_frame_paths:
+                image = cv2.imread(frame_path)
+                if image is None:
+                    raise FileNotFoundError(f"Failed to read sampled frame from cache: {frame_path}")
+                images_bgr.append(image)
+
+        return self.feature_builder.scene_extractor.compute_pair_signals(
+            window_tracks=sampled_tracks,
+            images_bgr=images_bgr,
+            lowres_weight=SCENE_FEATURE_WEIGHTS.get("lowres_eventness", 0.0),
+            layout_weight=SCENE_FEATURE_WEIGHTS.get("track_layout_eventness", 0.0),
+            clip_weight=SCENE_FEATURE_WEIGHTS.get("clip_eventness", 0.0),
+            raft_weight=SCENE_FEATURE_WEIGHTS.get("raft_eventness", 0.0),
         )
 
-        boundary_high = float(getattr(boundary_cfg, "high", 1.0))
-        boundary_low = float(getattr(boundary_cfg, "low", 0.5))
-        self.boundary_detector = BoundaryDetector(high=boundary_high, low=boundary_low)
-        self.event_builder = EventBuilder()
-        self.refiner = ProposalRefiner(
-            min_len_frames=int(getattr(refiner_cfg, "min_len_frames", 8)),
-            merge_gap_frames=int(getattr(refiner_cfg, "merge_gap_frames", 8)),
-            buffer_frames=int(getattr(refiner_cfg, "buffer_frames", 2)),
-        )
-
-        assets_subdir = str(getattr(evidence_cfg, "assets_subdir", "assets"))
-        assets_dir = str(Path(cfg.output.output_dir) / assets_subdir)
-        self.evidence_builder = EvidenceBuilder(assets_dir)
-        self.use_vlm = bool(getattr(cfg.vlm, "enable", False))
-
-    def run_offline(self, input_video: str) -> list[FinalResult]:
+    def run_offline(self, input_video: str):
         if not input_video:
             raise ValueError("input_video is empty")
+        # Make subdirs for current video
+        video_id = Path(input_video).stem
+        cur_output_dir = self.results_dir / video_id
+        cur_output_dir.mkdir(parents=True, exist_ok=True)
+        cur_assets_dir = self.assets_dir / video_id
+        cur_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        input_fps = float(getattr(self.cfg.video, "input_fps", 25.0))
         reader = build_reader(
             input_video,
-            input_fps=input_fps,
-            resize_max_side=int(getattr(self.cfg.video, "resize_max_side", 0) or 0),
-            resize_interpolation=str(getattr(self.cfg.video, "resize_interpolation", "area")),
+            input_fps=self.cfg.video.input_fps,
+            resize_max_side=self.cfg.video.resize_max_side,
+            resize_interpolation=self.cfg.video.resize_interpolation,
         )
-        self.logger.info(f"Video {input_video} opened with FPS={reader.fps()} and total_frames={reader.frame_count()}")
-        sampler = FrameSampler(reader.fps() or 25.0, self.cfg.video.fps_sample)
+        sampler = FrameSampler(reader.fps(), self.cfg.video.fps_sample)
+        self.logger.info(f"Video opened: {input_video}, original_fps={self.cfg.video.input_fps}, sample_fps={self.cfg.video.fps_sample}")
+        self.logger.info(f"Processing total {reader.frame_count()} frames")
 
-        frame_cache_dir = Path(self.cfg.output.output_dir) / "cache" / "sampled_frames"
+        frame_cache_dir = Path(self.output_dir) / "cache" / video_id / "sampled_frames"
         frame_cache_dir.mkdir(parents=True, exist_ok=True)
 
         sampled_frame_ids: list[int] = []
+        sampled_frame_paths: list[str] = []
         sampled_tracks_raw: list[list[TrackObject]] = []
         sampled_frames: dict[int, Any] = {}
 
         try:
-            for frame_id, frame in sampler.sample(iter(reader)):
+            self.logger.info("Start sampling frames and tracking...")
+            total_frames = int(reader.frame_count())
+            total_sampled = None if total_frames <= 0 else (total_frames + sampler.stride - 1) // sampler.stride
+            for frame_id, frame in tqdm(
+                sampler.sample(iter(reader)),
+                total=total_sampled,
+                desc=f"{video_id}: sample+track",
+                dynamic_ncols=True,
+            ):
                 sampled_frame_ids.append(frame_id)
                 frame_path = frame_cache_dir / f"{frame_id:08d}.jpg"
                 cv2.imwrite(str(frame_path), frame)
                 sampled_frames[frame_id] = str(frame_path)
+                sampled_frame_paths.append(str(frame_path))
 
                 results = self.detector_tracker.track_frame(frame, persist=True)
                 tracks = parse_ultralytics_results(results, frame_id)
                 sampled_tracks_raw.append(tracks)
         finally:
             reader.release()
+            self.logger.info(f"Finished tracking and caching sampled frames. Total sampled frames: {len(sampled_frame_ids)}")
 
         sampled_tracks = sampled_tracks_raw
-        track_refine_map: dict[int, int] = {}
-        if self.track_refiner_enable and sampled_tracks_raw:
+        if self.enable_track_refine and sampled_tracks_raw:
             sampled_tracks, track_refine_map = refine_track_ids(
                 sampled_tracks_raw,
-                max_frame_gap=self.track_refiner_max_gap,
-                max_center_dist=self.track_refiner_max_center_dist,
-                max_size_ratio=self.track_refiner_max_size_ratio,
-                min_direction_cos=self.track_refiner_min_direction_cos,
-                max_speed_ratio=self.track_refiner_max_speed_ratio,
-                gap_relax_factor=self.track_refiner_gap_relax_factor,
+                **self.track_refiner_params
             )
 
-        # Rebuild caches from refined tracks so trigger/proposal/evidence use consistent ids.
-        self.track_cache = TrackCache(max_frames=self.track_cache_max_frames)
-        self.feature_cache = FeatureCache(max_windows=self.feature_cache_max_windows)
-        frame_prefix: list[int] = []
-        track_prefix: list[list[TrackObject]] = [] # cache in order to simulate online processing, so only use tracks within bounded cache tail for feature/windows build, but keep all sampled tracks for final proposal/evidence correctness.
-        for frame_id, tracks in zip(sampled_frame_ids, sampled_tracks):
-            frame_prefix.append(frame_id)
-            track_prefix.append(tracks)
-            self.track_cache.add(tracks)
-            if self.feature_builder.ready(frame_prefix, track_prefix):
-                frame_win = frame_prefix[-self.cfg.video.window_size :]
-                track_win = self.track_cache.get_window(self.cfg.video.window_size)
-                wf = self.feature_builder.build(frame_win, track_win)
-                self.feature_cache.add(wf)
+        # Build window features
+        # Keep only one sliding window of decoded images in memory.
+        windows, scores = self._build_window_features(
+            sampled_frame_ids=sampled_frame_ids,
+            sampled_frame_paths=sampled_frame_paths,
+            sampled_tracks=sampled_tracks,
+        )
+        assert len(scores) == len(sampled_frame_ids), f"Length of scores ({len(scores)}) should match length of sampled frames ({len(sampled_frame_ids)})"
+        plot_scores(scores, frame_ids=sampled_frame_ids, output_dir=cur_output_dir)
+        self.logger.info(f"Score plot saved to {cur_output_dir}")
 
-        windows = self.feature_cache.all()
-        scores = [w.trigger_score for w in windows]
-        boundaries = self.boundary_detector.detect(scores)
-        proposals = self.event_builder.build(boundaries, windows)
-        proposals = self.refiner.refine(proposals)
+        coarse_spans = BoundaryDetector(self.boundary_detector_cfg).detect(scores)
 
-        self.last_debug = {
-            "windows": windows,
-            "scores": scores,
-            "proposals": proposals,
-            "sampled_frame_ids": sampled_frame_ids,
-            "sampled_frames": sampled_frames,
-            "sampled_tracks": sampled_tracks,
-            "sampled_tracks_raw": sampled_tracks_raw,
-            "track_refine_map": track_refine_map,
-        }
+        # # Run tree pipeline
+        # all_tracks = [track for frame_tracks in sampled_tracks for track in frame_tracks]
+        # all_nodes: list[EventNode] = []
 
-        # Use all sampled tracks (not bounded cache tail) for full-video proposal/evidence correctness.
-        all_tracks = [t for tracks in sampled_tracks for t in tracks]
-        final_results: list[FinalResult] = []
-        for p in proposals:
-            p = refine_start_time(select_main_object(p, all_tracks))
-            evidence = self.evidence_builder.build(p, windows, sampled_frames, all_tracks)
+        # if not windows:
+        #     self.logger.warning(
+        #         "No valid windows were built. The video is likely shorter than window_size=%d.",
+        #         int(self.cfg.video.window_size),
+        #     )
+        # elif max(scores, default=0.0) <= 0.0:
+        #     self.logger.warning("All dense scores are non-positive; skipping tree pipeline.")
+        # else:
+        #     all_nodes = self.tree_pipeline.process(
+        #         images=sampled_frame_paths,
+        #         frame_ids=sampled_frame_ids,
+        #         scores=scores,
+        #         all_tracks=all_tracks,
+        #         windows=windows,
+        #         method=self.tree_method,
+        #     )
+        #     self.logger.info(f"Tree pipeline finished with {len(all_nodes)} event nodes.")
 
-            if self.use_vlm:
-                from src.vlm.infer import run_inference
-                from src.vlm.model_loader import LocalVLM
-                from src.vlm.parser import parse_vlm_output
-                from src.vlm.prompt_stage1 import build_stage1_prompt
-                from src.vlm.prompt_stage2 import build_stage2_prompt
 
-                local_vlm = LocalVLM(
-                    model_path=self.cfg.vlm.model_path,
-                    device=self.cfg.vlm.device,
-                    dtype=self.cfg.vlm.dtype,
-                )
-                p1 = build_stage1_prompt(evidence.summary)
-                stage1_text = run_inference(local_vlm, p1, evidence.keyframe_paths, self.cfg.vlm.max_new_tokens)
-                p2 = build_stage2_prompt(stage1_text)
-                stage2_text = run_inference(local_vlm, p2, evidence.overlay_paths, self.cfg.vlm.max_new_tokens)
-                vlm_result = parse_vlm_output(stage2_text)
-            else:
-                vlm_result = VLMResult(
-                    is_anomaly=False,
-                    event_type="vlm_disabled",
-                    confidence=0.0,
-                    summary="VLM inference is disabled. Detection/tracking and visual debug outputs are available.",
-                    supporting_evidence=[],
-                    counter_evidence=[],
-                )
-
-            final_results.append(FinalResult(event_id=p.event_id, proposal=p, evidence=evidence, vlm_result=vlm_result))
-
-        return final_results
+        # return all_nodes

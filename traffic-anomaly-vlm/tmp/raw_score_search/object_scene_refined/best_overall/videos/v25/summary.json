@@ -1,0 +1,17 @@
+{
+  "hit_ratio": 1.0,
+  "full80_ratio": 1.0,
+  "mean_best_cover": 0.8726114649681529,
+  "mean_best_iou": 0.42679127725856697,
+  "mean_best_pred_to_gt_ratio": 1.9171974522292994,
+  "avg_span_ratio": 0.8157181571815718,
+  "num_pred_spans": 1.0,
+  "gt_lift": 0.6977081298828125,
+  "wide_single_flag": 0.0,
+  "pred_spans": [
+    [
+      11,
+      311
+    ]
+  ]
+}

@@ -3,31 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.schemas import VLMResult
-
-
-def parse_vlm_output(raw: str) -> VLMResult:
-    try:
-        s = raw[raw.find("{") : raw.rfind("}") + 1] if "{" in raw and "}" in raw else raw
-        obj = json.loads(s)
-        return VLMResult(
-            is_anomaly=bool(obj.get("is_anomaly", False)),
-            event_type=str(obj.get("event_type", "unknown")),
-            confidence=float(obj.get("confidence", 0.0)),
-            summary=str(obj.get("summary", "")),
-            supporting_evidence=list(obj.get("supporting_evidence", [])),
-            counter_evidence=list(obj.get("counter_evidence", [])),
-        )
-    except Exception as e:
-        return VLMResult(
-            is_anomaly=False,
-            event_type="parse_error",
-            confidence=0.0,
-            summary=f"parse failed: {e}",
-            supporting_evidence=[],
-            counter_evidence=[],
-        )
-
 
 def _extract_json_obj(raw: str) -> dict[str, Any]:
     if not raw:
@@ -42,6 +17,11 @@ def _extract_json_obj(raw: str) -> dict[str, Any]:
         return {}
 
 
+
+def parse_vlm_output(raw: str):
+    pass
+    
+# For pure vlm pipeline, use with build_pure_stage1_prompt
 def parse_stage1_output(raw: str, chunks: int = 4) -> dict[str, Any]:
     obj = _extract_json_obj(raw)
     chunk_desc = obj.get("chunk_descriptions", [])
@@ -70,7 +50,7 @@ def parse_stage1_output(raw: str, chunks: int = 4) -> dict[str, Any]:
         "risk_hint": risk_hint,
     }
 
-
+# For pure vlm pipeline, use with build_pure_stage2_prompt
 def parse_stage2_output(raw: str, chunks: int = 4) -> dict[str, Any]:
     obj = _extract_json_obj(raw)
 
@@ -151,60 +131,30 @@ def parse_stage2_output(raw: str, chunks: int = 4) -> dict[str, Any]:
         else [],
     }
 
-
-def parse_coarse_router_output(raw: str) -> dict[str, Any]:
+# Use with build_span_score_prompt, single-stage VLM scoring of spans
+def parse_span_score_output(raw: str) -> dict[str, Any]:
     obj = _extract_json_obj(raw)
-
-    role = str(obj.get("role", "uncertain"))
-    if role not in {"core", "context", "transition", "uncertain"}:
-        role = "uncertain"
-
-    temporal_pattern = str(obj.get("temporal_pattern", "uncertain"))
-    if temporal_pattern not in {"localized", "sustained", "multi_stage", "uncertain"}:
-        temporal_pattern = "uncertain"
-
-    split_recommendation = str(obj.get("split_recommendation", "keep_coarse"))
-    if split_recommendation not in {"keep_coarse", "split_2", "split_3"}:
-        split_recommendation = "keep_coarse"
-
-    focus_region = obj.get("focus_region", [0.15, 0.85])
-    if not isinstance(focus_region, list) or len(focus_region) != 2:
-        focus_region = [0.15, 0.85]
     try:
-        focus_start = float(focus_region[0])
-        focus_end = float(focus_region[1])
+        anomaly_score = float(obj.get("anomaly_score", obj.get("score", obj.get("overall_score", 0.0))))
     except Exception:
-        focus_start, focus_end = 0.15, 0.85
-    focus_start = min(max(focus_start, 0.0), 1.0)
-    focus_end = min(max(focus_end, focus_start), 1.0)
-
-    boundary_adjust = obj.get("boundary_adjust", {})
-    if not isinstance(boundary_adjust, dict):
-        boundary_adjust = {}
-    try:
-        left = int(boundary_adjust.get("left", 0))
-    except Exception:
-        left = 0
-    try:
-        right = int(boundary_adjust.get("right", 0))
-    except Exception:
-        right = 0
-    left = min(max(left, -12), 12)
-    right = min(max(right, -12), 12)
+        anomaly_score = 0.0
+    anomaly_score = min(max(anomaly_score, 0.0), 1.0)
 
     try:
-        confidence = float(obj.get("confidence", 0.0))
+        confidence = float(obj.get("confidence", anomaly_score))
     except Exception:
         confidence = 0.0
     confidence = min(max(confidence, 0.0), 1.0)
 
     return {
-        "contains_core_anomaly": bool(obj.get("contains_core_anomaly", role == "core")),
-        "role": role,
-        "temporal_pattern": temporal_pattern,
-        "focus_region": [focus_start, focus_end],
-        "split_recommendation": split_recommendation,
-        "boundary_adjust": {"left": left, "right": right},
+        "anomaly_score": anomaly_score,
         "confidence": confidence,
         "reason": str(obj.get("reason", "")),
     }
+
+
+def parse_span_score_output_for_stage1(raw: str) -> dict[str, Any]:
+    pass
+
+def parse_span_score_output_for_stage2(raw: str) -> dict[str, Any]:
+    pass

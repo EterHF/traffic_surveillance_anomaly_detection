@@ -1,0 +1,2 @@
+mean_hit_ratio,mean_best_cover,mean_best_iou,full80_ratio,avg_num_pred_spans,avg_span_ratio,mean_best_pred_to_gt_ratio,mean_gt_lift,vlm_refine_rank,scheme,boundary
+1.0,0.8904789557383637,0.5648859691239941,0.7872340425531915,1.425531914893617,0.8434159700361815,1.667763595853939,0.5999712664782605,0.608974524259014,source_like_smooth5,peeks_hz1.35_exp10_16_mg12_min6

@@ -1,0 +1,38 @@
+{
+  "num_gt_intervals": 1,
+  "num_pred_spans": 3,
+  "pred_spans": [
+    [
+      9,
+      74
+    ],
+    [
+      114,
+      219
+    ],
+    [
+      244,
+      263
+    ]
+  ],
+  "hit_ratio": 1.0,
+  "full80_ratio": 0.0,
+  "mean_best_iou": 0.6106870229007634,
+  "mean_best_cover": 0.7619047619047619,
+  "mean_best_pred_to_gt_ratio": 1.0095238095238095,
+  "avg_span_ratio": 0.7272727272727273,
+  "gt_lift": 0.9082379341125488,
+  "items": [
+    {
+      "start_frame": 140,
+      "end_frame": 244,
+      "best_iou": 0.6106870229007634,
+      "best_cover": 0.7619047619047619,
+      "best_pred_to_gt_ratio": 1.0095238095238095,
+      "best_pred_span": [
+        114,
+        219
+      ]
+    }
+  ]
+}

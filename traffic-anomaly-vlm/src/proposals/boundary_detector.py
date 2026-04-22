@@ -3,6 +3,27 @@ from __future__ import annotations
 from typing import Literal
 
 from scipy.signal import savgol_filter
+from dataclasses import dataclass
+
+@dataclass
+class BoundaryDetectorConfig:
+    high: float | None = None
+    low: float | None = None
+    online: bool = False
+    
+    use_savgol_filter: bool = False
+    method: Literal["by_peeks", "by_thres"] = "by_peeks"
+    # Robust z-score parameters for adaptive thresholding.
+    high_z: float = 1.0
+    low_z: float = 0.5
+    factor_online: float = 0.3
+    # Peak/span post-process parameters.
+    peak_gap: int = 5
+    peak_expand: tuple[int, int] = (12, 25)
+    min_span_len: int = 12
+    merge_gap: int = 25
+    savgol_window: int = 7
+    savgol_polyorder: int = 3
 
 
 def _median(vals: list[float]) -> float:
@@ -40,40 +61,24 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 class BoundaryDetector:
     def __init__(
         self,
-        high: float | None = None,
-        low: float | None = None,
-        online: bool = False,
-        use_savgol_filter: bool = False,
-        method: Literal["by_peeks", "by_thres"] = "by_peeks",
-        # Robust z-score parameters for adaptive thresholding.
-        high_z: float = 1.0,
-        low_z: float = 0.5,
-        # Online mode generally needs a lower threshold factor for recall.
-        factor_online: float = 0.3,
-        # Peak/span post-process parameters.
-        peak_gap: int = 5,
-        peak_expand: tuple[int, int] = (12, 25),
-        min_span_len: int = 12,
-        merge_gap: int = 25,
-        savgol_window: int = 7,
-        savgol_polyorder: int = 3,
+        cfg: BoundaryDetectorConfig,
     ):
-        self.high = high
-        self.low = low
-        self.online = online
-        self.use_savgol_filter = use_savgol_filter
-        self.savgol_window = max(5, int(savgol_window) | 1)
-        self.savgol_polyorder = max(1, int(savgol_polyorder))
-        self.method = method
-        self.high_z = float(high_z)
-        self.low_z = float(low_z)
-        self.factor_online = float(factor_online)
-        self.peak_gap = max(1, int(peak_gap))
-        self.peak_expand = (max(0, int(peak_expand[0])), max(0, int(peak_expand[1])))
-        self.min_span_len = max(1, int(min_span_len))
-        self.merge_gap = max(0, int(merge_gap))
+        self.high = cfg.high
+        self.low = cfg.low
+        self.online = cfg.online
+        self.use_savgol_filter = cfg.use_savgol_filter
+        self.savgol_window = max(5, int(cfg.savgol_window) | 1)
+        self.savgol_polyorder = max(1, int(cfg.savgol_polyorder))
+        self.method = cfg.method
+        self.high_z = float(cfg.high_z)
+        self.low_z = float(cfg.low_z)
+        self.factor_online = float(cfg.factor_online)
+        self.peak_gap = max(1, int(cfg.peak_gap))
+        self.peak_expand = (max(0, int(cfg.peak_expand[0])), max(0, int(cfg.peak_expand[1])))
+        self.min_span_len = max(1, int(cfg.min_span_len))
+        self.merge_gap = max(0, int(cfg.merge_gap))
 
-    def detect(self, scores: list[float]) -> list[tuple[int, int]] | bool:
+    def detect(self, scores: list[float]) -> list[tuple[int, int]]:
         if not scores:
             return []
 

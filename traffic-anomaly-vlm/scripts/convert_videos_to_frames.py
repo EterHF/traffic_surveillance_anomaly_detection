@@ -1,3 +1,5 @@
+# Convert all sub videos in input root to frame folders in output root.
+
 from __future__ import annotations
 
 import argparse

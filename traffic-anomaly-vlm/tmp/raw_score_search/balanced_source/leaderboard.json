@@ -1,0 +1,15 @@
+[
+  {
+    "mean_hit_ratio": 1.0,
+    "mean_best_cover": 0.8904789557383637,
+    "mean_best_iou": 0.5648859691239941,
+    "full80_ratio": 0.7872340425531915,
+    "avg_num_pred_spans": 1.425531914893617,
+    "avg_span_ratio": 0.8434159700361815,
+    "mean_best_pred_to_gt_ratio": 1.667763595853939,
+    "mean_gt_lift": 0.5999712664782605,
+    "vlm_refine_rank": 0.608974524259014,
+    "scheme": "source_like_smooth5",
+    "boundary": "peeks_hz1.35_exp10_16_mg12_min6"
+  }
+]

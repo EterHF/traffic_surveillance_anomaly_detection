@@ -1,0 +1,26 @@
+{
+  "num_gt_intervals": 1,
+  "num_pred_spans": 2,
+  "pred_spans": [
+    [
+      7,
+      70
+    ],
+    [
+      113,
+      384
+    ]
+  ],
+  "hit_ratio": 1.0,
+  "full80_ratio": 1.0,
+  "mean_best_iou": 0.21323529411764705,
+  "mean_best_cover": 1.0,
+  "items": [
+    {
+      "start_frame": 113,
+      "end_frame": 170,
+      "best_iou": 0.21323529411764705,
+      "best_cover": 1.0
+    }
+  ]
+}

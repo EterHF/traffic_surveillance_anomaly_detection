@@ -1,31 +1,34 @@
-input_video: "/nvme2/VAD_yemao/data/tad/TAD/frames/abnormal/01_Accident_001.mp4"
-
 video:
   input_fps: 25
   fps_sample: 25
   resize_max_side: 640
   resize_interpolation: "area"
-  window_size: 4
+  window_size: 16
   window_step: 1
 
 perception:
-  yolo_model: "weights/yolo26n.pt"
+  model_path: "weights/yolo26n.pt"
   tracker: "bytetrack.yaml"
   conf: 0.25
   iou: 0.5
   classes: [0, 1, 2, 3, 5, 7]
-  track_refiner:
-    enable: true
-    max_gap: 8
-    max_center_dist: 0.06
-    max_size_ratio: 2.5
+
+track_refiner:
+  enable: true
+  max_frame_gap: 8
+  max_center_dist: 0.06
+  max_size_ratio: 2.5
+  min_direction_cos: -0.1
+  max_speed_ratio: 3.5
+  gap_relax_factor: 0.20
 
 vlm:
-  enable: false
+  enable: true
   model_path: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/qwen3-vl-4bi"
-  device: "cuda"
+  device: "cuda:0"
   dtype: "float16"
   max_new_tokens: 4096
+  max_image_size: 640
 
 pure_vlm_baseline:
   window_size: 60
@@ -42,133 +45,72 @@ pure_vlm_baseline:
   min_interval_len: 10
   merge_gap: 8
 
-features:
-  track:
-    fit_degree: 2
-    # null means use current window_size
-    history_len: null
-  eventness:
-    use_clip: false
-    use_raft: false
-    use_lowres: true
-    use_track_layout: true
-    lowres_size: 32
-    occupancy_grid: 4
-    smooth_window: 9
-    smooth_polyorder: 2
-    clip_weight: 0.45
-    raft_weight: 0.15
-    lowres_weight: 0.20
-    track_weight: 0.20
-    signal_weight: 0.30
-  clip:
-    model_name: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/clip-vit-base-patch32"
-    model_revision: ""
-    device: "cuda"
-    batch_size: 24
-    resize_long_side: 640
-    resize_interpolation: "area"
-  raft:
-    root: "/nvme2/VAD_yemao/traffic-anomaly-vlm/src/features/RAFT"
-    weights: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/raft/raft-things.pth"
-    device: "cuda"
-    iters: 12
-    resize_long_side: 640
-    resize_interpolation: "area"
-    flow_proj_dim: 128
-    flow_proj_seed: 42
+track_features:
+  fit_degree: 3
+  # null means use current window_size
+  history_len: null
+
+scene_features:
+  lowres_size: 32
+  occupancy_grid: 4
+
+  clip_model_name: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/clip-vit-base-patch32"
+  clip_model_revision: null
+  clip_device: "cuda:0"
+  clip_batch_size: 16
+  clip_resize_long_side: 640
+  clip_resize_interpolation: "area"
+
+  raft_root: "/nvme2/VAD_yemao/traffic-anomaly-vlm/src/features/RAFT"
+  raft_weights: "/nvme2/VAD_yemao/traffic-anomaly-vlm/weights/raft/raft-things.pth"
+  raft_device: "cuda:0"
+  raft_iters: 12
+  raft_resize_long_side: 640
+  raft_resize_interpolation: "area"
+  raft_flow_proj_dim: 128
+  raft_flow_proj_seed: 42
 
 output:
   save_assets: true
   save_json: true
-  output_dir: "outputs"
+  output_dir: "outputs/"
 
-components:
-  track_cache:
-    # null means auto: max(64, window_size * 4)
-    max_frames: null
+tree_build_config:
+  max_depth: 3
+  min_span_len: 8
+  split_min_len: 16
+  peak_gap: 5
+  peak_expand: [10, 15]
+  merge_gap: 10
+  per_level_high_z: [1.0, 0.6, 0.3]
+  min_output_span: 8
+  use_savgol_filter: false
+  refine_coarse: true
+  prompt_method: "single_stage"
 
-  feature_cache:
-    # null means unbounded (keep all windows)
-    max_windows: null
+tree_refine_config:
+  min_confidence: 0.35,
+  prior_weight: 0.4
+  vlm_weight: 0.6
 
-  boundary_detector:
-    online: false
-    use_savgol_filter: false
-    method: "by_peeks" # ["by_peeks", "by_thres"]
-    high_z: 3.0
-    low_z: 1.0
-    factor_online: 0.3
-    peak_gap: 5
-    peak_expand: [12, 25] 
-    min_span_len: 12
-    merge_gap: 25
+boundary_detector:
+  high: null
+  low: null
+  online: false
+  use_savgol_filter: false
+  method: "by_peeks"
+  # Robust z-score parameters for adaptive thresholding.
+  high_z: 1.0
+  low_z: 0.5
+  factor_online: 0.3
+  # Peak/span post-process parameters.
+  peak_gap: 5
+  peak_expand: [12, 25]
+  min_span_len: 12
+  merge_gap: 25
+  savgol_window: 7
+  savgol_polyorder: 3
 
-  proposal_refiner:
-    min_len_frames: 8
-    merge_gap_frames: 8
-    buffer_frames: 2
-
-  evidence_builder:
-    assets_subdir: "assets"
-
-  event_tree:
-    max_depth: 2
-    min_span_len: 8
-    split_min_len: 20
-    peak_gap: 4
-    peak_expand: [4, 8]
-    merge_gap: 4
-    per_level_high_z: [0.9, 0.55]
-    use_savgol_filter: false
-
-  node_selector:
-    top_k: 6
-    min_node_len: 8
-    overlap_iou: 0.85
-    gate_floor: 0.55
-    reference_span: 96
-
-  coarse_proposal:
-    interval_high_z: 0.85
-    interval_peak_gap: 4
-    interval_peak_expand: [10, 18]
-    interval_min_span_len: 12
-    interval_merge_gap: 10
-    tree_max_depth: 1
-    tree_min_span_len: 8
-    tree_split_min_len: 20
-    tree_peak_gap: 4
-    tree_peak_expand: [4, 8]
-    tree_merge_gap: 4
-    tree_high_z: [0.9]
-    merge_iou: 0.4
-    merge_center_gap: 20
-    max_proposals: 8
-
-  coarse_router:
-    enabled: false
-    mode: "heuristic"  # ["heuristic", "vlm"]
-    max_nodes: 4
-    max_new_tokens: 256
-    max_image_size: 640
-    min_confidence: 0.35
-
-  fine_tree:
-    min_output_span: 8
-    focus_region_pad: 0.10
-    localized_high_z: [0.8, 0.45]
-    localized_split_min_len: 12
-    localized_peak_gap: 3
-    localized_peak_expand: [2, 5]
-    localized_merge_gap: 3
-    multi_stage_high_z: [0.75, 0.42]
-    multi_stage_split_min_len: 10
-    multi_stage_peak_gap: 3
-    multi_stage_peak_expand: [2, 4]
-    multi_stage_merge_gap: 2
-    uncertain_high_z: [0.9, 0.55]
-    uncertain_split_min_len: 16
-    uncertain_peak_gap: 4
-    uncertain_peak_expand: [4, 8]
-    uncertain_merge_gap: 4
+evidence_builder:
+  assets_subdir: "assets"
+  method: "montage" # "montage" or "enhanced"

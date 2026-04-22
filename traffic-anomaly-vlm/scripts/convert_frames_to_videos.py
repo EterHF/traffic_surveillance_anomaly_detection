@@ -1,3 +1,5 @@
+# Convert all subdir frame sequences in input root to MP4 videos in output root.
+
 from __future__ import annotations
 
 import argparse

@@ -3,11 +3,28 @@ from __future__ import annotations
 import json
 
 
-def build_stage2_prompt(stage1_text: str) -> str:
+def _evidence_desc(evidence_method: str) -> str:
+    if evidence_method == "montage":
+        return "a montage image composed of sampled frames in time order"
+    if evidence_method == "frames":
+        return "multiple sampled frames in time order"
+    if evidence_method == "enhanced":
+        return "multiple sampled frames with object tracks, boxes, ids, and trajectory overlays"
+    return "visual evidence from a candidate traffic segment"
+
+
+def build_stage2_prompt(stage1_text: dict | str, summary: dict | None = None, evidence_method: str = "montage") -> str:
     return (
-        "Given the neutral description below, decide if this is a traffic anomaly. "
-        "Return strict JSON with keys: is_anomaly, event_type, confidence, summary, supporting_evidence, counter_evidence. "
-        f"Description: {stage1_text}"
+        "You are a traffic anomaly judge.\n\n"
+        "You are given a candidate traffic segment.\n"
+        f"The visual evidence is { _evidence_desc(evidence_method) }.\n"
+        f"Structured summary: {json.dumps(summary or {}, ensure_ascii=False)}\n"
+        f"Stage-1 analysis: {json.dumps(stage1_text, ensure_ascii=False) if isinstance(stage1_text, dict) else str(stage1_text)}\n\n"
+        "Return JSON only with keys:\n"
+        "- anomaly_score: float in [0,1]\n"
+        "- confidence: float in [0,1]\n"
+        "- reason: one short sentence\n"
+        "- evidence_tags: short list such as [\"setup\", \"impact\", \"aftermath\", \"context\"]\n"
     )
 
 

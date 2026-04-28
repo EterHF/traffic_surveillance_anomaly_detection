@@ -9,8 +9,10 @@ import numpy as np
 from src.evidence.evidence_utils import (
     build_event_summary,
     build_labeled_montage,
+    draw_track_annotations,
+    filter_tracks_by_frame,
     load_frame_ref,
-    save_image
+    save_image,
 )
 from src.schemas import EvidencePack, EventNode, TrackObject, WindowFeature
 
@@ -32,7 +34,7 @@ class EvidenceFactory:
         output_dir: str | None = None,
         windows: list[WindowFeature] | None = None,
         all_tracks: list[TrackObject] | None = None,
-        method: Literal["montage", "enhanced"] = "montage",
+        method: Literal["montage", "frames", "enhanced"] = "montage",
     ) -> EvidencePack:
 
         resolved_output_dir = str(output_dir or self.default_output_dir or "").strip()
@@ -45,8 +47,22 @@ class EvidenceFactory:
                 frame_ids=frame_ids,
                 output_dir=resolved_output_dir,
             )
-        else:
-            raise NotImplementedError(f"Unsupported evidence build method: {method}")
+        if method == "frames":
+            return self._build_frames_evidence(
+                node=subject,
+                images=images,
+                frame_ids=frame_ids,
+            )
+        if method == "enhanced":
+            return self._build_enhanced_evidence(
+                node=subject,
+                images=images,
+                frame_ids=frame_ids,
+                windows=windows,
+                all_tracks=all_tracks or [],
+                output_dir=resolved_output_dir,
+            )
+        raise NotImplementedError(f"Unsupported evidence build method: {method}")
 
     @staticmethod
     def _sample_span_indices(start_idx: int, peak_idx: int, end_idx: int) -> list[int]:
@@ -110,6 +126,30 @@ class EvidenceFactory:
             summary=summary,
         )
 
+    def _build_frames_evidence(
+        self,
+        node: EventNode,
+        images: list[str],
+        frame_ids: list[int],
+    ) -> EvidencePack:
+        sample_indices = self._sample_span_indices(int(node.start_idx), int(node.peak_idx), int(node.end_idx))
+        keyframe_paths: list[str] = []
+        keyframe_ids: list[int] = []
+        for idx in sample_indices:
+            if 0 <= idx < len(images):
+                keyframe_paths.append(str(images[idx]))
+                keyframe_ids.append(int(frame_ids[idx]))
+
+        summary = build_event_summary(node)
+        summary["keyframe_ids"] = [int(v) for v in keyframe_ids]
+        summary["evidence_method"] = "frames"
+        summary["num_images"] = int(len(keyframe_paths))
+        return EvidencePack(
+            event_id=str(node.node_id),
+            keyframe_paths=keyframe_paths,
+            summary=summary,
+        )
+
     def _build_enhanced_evidence(
         self,
         node: EventNode,
@@ -119,7 +159,44 @@ class EvidenceFactory:
         all_tracks: list[TrackObject],
         output_dir: str,
     ) -> EvidencePack:
-        raise NotImplementedError("Enhanced evidence build is not implemented yet")
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        sample_indices = self._sample_span_indices(int(node.start_idx), int(node.peak_idx), int(node.end_idx))
+        span_tracks = [
+            track
+            for track in all_tracks
+            if int(node.start_frame) <= int(track.frame_id) <= int(node.end_frame)
+        ]
+        keyframe_paths: list[str] = []
+        keyframe_ids: list[int] = []
+
+        for idx in sample_indices:
+            if idx < 0 or idx >= len(images):
+                continue
+            frame = load_frame_ref(images[idx])
+            if frame is None:
+                continue
+            frame_id = int(frame_ids[idx])
+            annotated = draw_track_annotations(
+                frame,
+                frame_tracks=filter_tracks_by_frame(span_tracks, frame_id),
+                span_tracks=span_tracks,
+            )
+            save_path = str(out_dir / f"{node.node_id}_frame_{frame_id}.jpg")
+            save_image(save_path, annotated)
+            keyframe_paths.append(save_path)
+            keyframe_ids.append(frame_id)
+
+        summary = build_event_summary(node)
+        summary["keyframe_ids"] = [int(v) for v in keyframe_ids]
+        summary["evidence_method"] = "enhanced"
+        summary["num_images"] = int(len(keyframe_paths))
+        return EvidencePack(
+            event_id=str(node.node_id),
+            keyframe_paths=keyframe_paths,
+            summary=summary,
+        )
 
 
 class EvidenceBuilder:
@@ -133,7 +210,7 @@ class EvidenceBuilder:
         frame_ids: list[int],
         all_tracks: list[TrackObject],
         windows: list[WindowFeature] | None = None,
-        method: Literal["montage", "enhanced"] = "montage",
+        method: Literal["montage", "frames", "enhanced"] = "montage",
         output_dir: str | None = None,
     ) -> EvidencePack:
         return self._factory.build(

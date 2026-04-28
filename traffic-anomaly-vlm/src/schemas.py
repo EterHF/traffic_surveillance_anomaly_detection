@@ -54,4 +54,3 @@ class EvidencePack(BaseModel):
     keyframe_paths: list[str] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
 
-

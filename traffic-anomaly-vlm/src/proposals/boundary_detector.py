@@ -1,202 +1,179 @@
 from __future__ import annotations
 
-from typing import Literal
+from dataclasses import dataclass, field
 
-from scipy.signal import savgol_filter
-from dataclasses import dataclass
+import numpy as np
+
+
+Span = tuple[int, int]
+
+
+@dataclass
+class BoundaryDetection:
+    """Peak-centered proposal result."""
+
+    peaks: list[int]
+    spans: list[Span]
+    thresholds: dict[str, float] = field(default_factory=dict)
+
 
 @dataclass
 class BoundaryDetectorConfig:
-    high: float | None = None
-    low: float | None = None
-    online: bool = False
-    
-    use_savgol_filter: bool = False
-    method: Literal["by_peeks", "by_thres"] = "by_peeks"
-    # Robust z-score parameters for adaptive thresholding.
-    high_z: float = 1.0
-    low_z: float = 0.5
-    factor_online: float = 0.3
-    # Peak/span post-process parameters.
-    peak_gap: int = 5
-    peak_expand: tuple[int, int] = (12, 25)
-    min_span_len: int = 12
-    merge_gap: int = 25
-    savgol_window: int = 7
-    savgol_polyorder: int = 3
+    """Minimal config for peak-centered boundary proposals."""
+
+    # Start from a robust threshold, then relax/trim to keep roughly 5-10 peaks.
+    high_z: float = 0.85
+    min_peak_score: float = 0.15
+    min_peaks: int = 5
+    max_peaks: int = 10
+
+    # All units are sampled-frame indices.
+    peak_gap: int = 2
+    peak_expand: tuple[int, int] = (8, 12)
+    merge_gap: int = 0
 
 
-def _median(vals: list[float]) -> float:
-    if not vals:
+def _median(values: np.ndarray) -> float:
+    if values.size == 0:
         return 0.0
-    xs = sorted(vals)
-    n = len(xs)
-    m = n // 2
-    if n % 2 == 1:
-        return float(xs[m])
-    return float((xs[m - 1] + xs[m]) * 0.5)
+    return float(np.median(values.astype(np.float32)))
 
 
-def _mad(vals: list[float], med: float) -> float:
-    if not vals:
-        return 0.0
-    dev = [abs(v - med) for v in vals]
-    return _median(dev)
-
-
-def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    if not spans:
-        return []
-    spans = sorted(spans, key=lambda x: x[0])
-    merged: list[tuple[int, int]] = [spans[0]]
-    for s, e in spans[1:]:
-        ps, pe = merged[-1]
-        if s <= pe + 1:
-            merged[-1] = (ps, max(pe, e))
-        else:
-            merged.append((s, e))
-    return merged
+def _clamp_span(start: int, end: int, n: int) -> Span:
+    start = max(0, min(int(start), n - 1))
+    end = max(0, min(int(end), n - 1))
+    if start > end:
+        start, end = end, start
+    return start, end
 
 
 class BoundaryDetector:
-    def __init__(
-        self,
-        cfg: BoundaryDetectorConfig,
-    ):
-        self.high = cfg.high
-        self.low = cfg.low
-        self.online = cfg.online
-        self.use_savgol_filter = cfg.use_savgol_filter
-        self.savgol_window = max(5, int(cfg.savgol_window) | 1)
-        self.savgol_polyorder = max(1, int(cfg.savgol_polyorder))
-        self.method = cfg.method
-        self.high_z = float(cfg.high_z)
-        self.low_z = float(cfg.low_z)
-        self.factor_online = float(cfg.factor_online)
-        self.peak_gap = max(1, int(cfg.peak_gap))
-        self.peak_expand = (max(0, int(cfg.peak_expand[0])), max(0, int(cfg.peak_expand[1])))
-        self.min_span_len = max(1, int(cfg.min_span_len))
-        self.merge_gap = max(0, int(cfg.merge_gap))
+    """Convert a 1D anomaly score curve into compact peak-centered spans."""
 
-    def detect(self, scores: list[float]) -> list[tuple[int, int]]:
-        if not scores:
+    def __init__(self, cfg: BoundaryDetectorConfig | None = None):
+        self.cfg = cfg or BoundaryDetectorConfig()
+        self.high_z = float(self.cfg.high_z)
+        self.min_peak_score = max(0.0, float(self.cfg.min_peak_score))
+        self.min_peaks = max(1, int(self.cfg.min_peaks))
+        self.max_peaks = max(self.min_peaks, int(self.cfg.max_peaks))
+        self.peak_gap = max(1, int(self.cfg.peak_gap))
+        self.peak_expand = self._coerce_pair(self.cfg.peak_expand, default=(8, 12))
+        self.merge_gap = max(0, int(self.cfg.merge_gap))
+
+    @staticmethod
+    def _coerce_pair(value: tuple[int, int] | list[int], default: tuple[int, int]) -> tuple[int, int]:
+        try:
+            if len(value) >= 2:
+                return max(0, int(value[0])), max(0, int(value[1]))
+        except Exception:
+            pass
+        return default
+
+    def detect(self, scores: list[float] | np.ndarray) -> list[Span]:
+        return self.detect_details(scores).spans
+
+    def detect_details(self, scores: list[float] | np.ndarray) -> BoundaryDetection:
+        values = self._prepare_scores(scores)
+        if values.size == 0:
+            return BoundaryDetection(peaks=[], spans=[], thresholds={})
+
+        thresholds = self._thresholds(values)
+        thresholds["max_score"] = float(np.max(values))
+        if float(np.max(values)) < self.min_peak_score:
+            # Null-aware gate upstream can legitimately produce no reliable
+            # evidence. In that case do not force proposals from noise.
+            thresholds["peak_high"] = float(thresholds["high"])
+            thresholds["num_peaks"] = 0.0
+            return BoundaryDetection(peaks=[], spans=[], thresholds=thresholds)
+
+        peaks = self._adaptive_peaks(values, thresholds)
+        spans = [self._span_around_peak(peak, n=int(values.size)) for peak in peaks]
+        kept = self._greedy_keep(peaks, spans, values)
+
+        thresholds["num_peaks"] = float(len(kept))
+        return BoundaryDetection(
+            peaks=[peak for peak, _ in kept],
+            spans=[span for _, span in kept],
+            thresholds=thresholds,
+        )
+
+    @staticmethod
+    def _prepare_scores(scores: list[float] | np.ndarray) -> np.ndarray:
+        values = np.asarray(scores, dtype=np.float32)
+        return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+    def _thresholds(self, values: np.ndarray) -> dict[str, float]:
+        med = _median(values)
+        mad = _median(np.abs(values.astype(np.float32) - med))
+        sigma = max(1e-6, 1.4826 * mad)
+        high = med + self.high_z * sigma
+        return {
+            "median": float(med),
+            "sigma": float(sigma),
+            "high": float(high),
+        }
+
+    @staticmethod
+    def _local_peaks(values: np.ndarray) -> list[int]:
+        n = int(values.size)
+        if n == 0:
             return []
-
-        if self.use_savgol_filter and len(scores) >= self.savgol_window:
-            polyorder = min(self.savgol_polyorder, self.savgol_window - 1)
-            scores = savgol_filter(scores, self.savgol_window, polyorder).tolist()
-
-        if self.method == "by_peeks":
-            peeks = self._detect_peeks(scores)
-            spans = self._peeks_to_spans(peeks, gap=self.peak_gap, expand=self.peak_expand, n=len(scores))
-        else:
-            spans = self._detect_spans_by_adaptive_threshold(scores)
-        refined_spans = self._refine_spans(spans, n=len(scores))
-
-        if self.online:
-            recent = [len(scores) - 10, len(scores) - 1]
-            for i, (s, e) in enumerate(refined_spans):
-                if s <= recent[1] <= e:
-                    return True
-        return refined_spans
-
-    def _detect_peeks(self, scores: list[float]) -> list[int]:
-        n = len(scores)
         if n == 1:
             return [0]
 
-        med = _median(scores)
-        sigma = max(1e-6, 1.4826 * _mad(scores, med))
-        peak_thr = float(self.high) if self.high is not None else (med + self.high_z * sigma)
-
         peaks: list[int] = []
-        for i in range(n):
-            left = scores[i - 1] if i > 0 else float("-inf")
-            right = scores[i + 1] if i + 1 < n else float("-inf")
-            if scores[i] >= left and scores[i] >= right and scores[i] >= peak_thr:
-                peaks.append(i)
-
-        # Fallback: keep at least one candidate peak for potential anomaly proposals.
-        if not peaks:
-            peaks = [int(max(range(n), key=lambda j: scores[j]))]
+        for idx in range(n):
+            left = float(values[idx - 1]) if idx > 0 else float("-inf")
+            right = float(values[idx + 1]) if idx + 1 < n else float("-inf")
+            center = float(values[idx])
+            if center >= left and center >= right:
+                peaks.append(idx)
         return peaks
 
-    def _peeks_to_spans(self, peeks: list[int], gap: int, expand: tuple[int, int], n: int) -> list[tuple[int, int]]:
-        if not peeks:
+    def _adaptive_peaks(self, values: np.ndarray, thresholds: dict[str, float]) -> list[int]:
+        candidates = self._local_peaks(values)
+        if not candidates:
+            thresholds["peak_high"] = float(thresholds["high"])
             return []
 
-        peeks = sorted(peeks)
-        clusters: list[list[int]] = [[peeks[0]]]
-        for p in peeks[1:]:
-            if p - clusters[-1][-1] <= gap:
-                clusters[-1].append(p)
-            else:
-                clusters.append([p])
+        high = float(thresholds["high"])
+        peaks = [idx for idx in candidates if float(values[idx]) >= max(high, self.min_peak_score)]
+        peaks = self._suppress_close_peaks(peaks, values)
 
-        left_expand, right_expand = expand
-        spans: list[tuple[int, int]] = []
-        for c in clusters:
-            s = max(0, c[0] - left_expand)
-            e = min(n - 1, c[-1] + right_expand)
-            spans.append((s, e))
-        return spans
+        thresholds["peak_high"] = float(min((float(values[p]) for p in peaks), default=high))
+        return sorted(int(p) for p in peaks)
 
-    def _detect_spans_by_adaptive_threshold(self, scores: list[float]) -> list[tuple[int, int]]:
-        median = _median(scores)
-        mad = _mad(scores, median)
-        sigma = max(1e-6, 1.4826 * mad)
+    def _suppress_close_peaks(self, peaks: list[int], values: np.ndarray) -> list[int]:
+        kept: list[int] = []
+        for peak in sorted(peaks, key=lambda idx: (float(values[idx]), -idx), reverse=True):
+            if all(abs(int(peak) - int(prev)) > self.peak_gap for prev in kept):
+                kept.append(int(peak))
+        return kept
 
-        high_thr = float(self.high) if self.high is not None else (median + self.high_z * sigma)
-        low_thr = float(self.low) if self.low is not None else (median + self.low_z * sigma)
-        low_thr = min(low_thr, high_thr)
+    def _span_around_peak(self, peak: int, n: int) -> Span:
+        left, right = self.peak_expand
+        return _clamp_span(int(peak) - left, int(peak) + right, n)
 
-        spans: list[tuple[int, int]] = []
-        in_span = False
-        start = 0
-        for i, s in enumerate(scores):
-            if not in_span and s >= high_thr:
-                in_span = True
-                start = i
-            elif in_span and s < low_thr:
-                spans.append((start, i - 1))
-                in_span = False
-        if in_span:
-            spans.append((start, len(scores) - 1))
-        
-        expanded_spans: list[tuple[int, int]] = []
-        for s, e in spans:
-            s = max(0, s - self.peak_expand[0] // 2)
-            e = min(len(scores) - 1, e + self.peak_expand[1] // 2)
-            expanded_spans.append((s, e))
-            
-        return expanded_spans
+    def _greedy_keep(
+        self,
+        peaks: list[int],
+        spans: list[Span],
+        values: np.ndarray,
+    ) -> list[tuple[int, Span]]:
+        kept: list[tuple[int, Span]] = []
+        items = sorted(
+            zip(peaks, spans),
+            key=lambda item: (float(values[int(item[0])]), -int(item[0])),
+            reverse=True,
+        )
+        for peak, span in items:
+            # If expanded intervals overlap or are too close, keep the stronger one.
+            if any(self._too_close(span, kept_span) for _, kept_span in kept):
+                continue
+            kept.append((int(peak), span))
+            # if len(kept) >= self.max_peaks:
+            #     break
+        return sorted(kept, key=lambda item: item[1][0])
 
-    def _refine_spans(self, spans: list[tuple[int, int]], n: int) -> list[tuple[int, int]]:
-        if not spans:
-            return []
-
-        # Normalize and clamp span boundaries.
-        norm: list[tuple[int, int]] = []
-        for s, e in spans:
-            s = max(0, min(int(s), n - 1))
-            e = max(0, min(int(e), n - 1))
-            if e < s:
-                s, e = e, s
-            norm.append((s, e))
-
-        merged = _merge_spans(norm)
-
-        # Merge nearby segments for stable proposal boundaries.
-        if self.merge_gap > 0 and merged:
-            compact: list[tuple[int, int]] = [merged[0]]
-            for s, e in merged[1:]:
-                ps, pe = compact[-1]
-                if s - pe <= self.merge_gap:
-                    compact[-1] = (ps, max(pe, e))
-                else:
-                    compact.append((s, e))
-            merged = compact
-
-        # Drop tiny spans.
-        return [se for se in merged if (se[1] - se[0] + 1) >= self.min_span_len]
-        
+    def _too_close(self, a: Span, b: Span) -> bool:
+        return a[0] <= b[1] + self.merge_gap and b[0] <= a[1] + self.merge_gap

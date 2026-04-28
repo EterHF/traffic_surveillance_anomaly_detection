@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     from ultralytics import YOLO
-except Exception as _e: 
+except Exception as _e:
     print(f"Error importing YOLO from ultralytics: {_e}")
 
 
@@ -20,6 +20,7 @@ class DetectorTrackerConfig:
     conf: float = 0.25
     iou: float = 0.5
     classes: list[int] | None = None
+    device: str | None = None
 
 
 class DetectorTracker:
@@ -29,11 +30,13 @@ class DetectorTracker:
         self,
         cfg: DetectorTrackerConfig | None = None,
     ): 
+        if cfg is None:
+            raise ValueError("DetectorTracker requires a DetectorTrackerConfig")
         self.cfg = cfg
         self.model = YOLO(cfg.model_path)
 
     def _track_kwargs(self, persist: bool) -> dict:
-        return {
+        kwargs = {
             "persist": persist,
             "tracker": self.cfg.tracker,
             "conf": self.cfg.conf,
@@ -41,6 +44,9 @@ class DetectorTracker:
             "classes": self.cfg.classes,
             "verbose": False,
         }
+        if self.cfg.device:
+            kwargs["device"] = self.cfg.device
+        return kwargs
 
     def track_video(self, source: str) -> Iterable:
         return self.model.track(

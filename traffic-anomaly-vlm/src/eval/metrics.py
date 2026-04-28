@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+
+from src.eval.utils import interval_iou
 
 
 def precision_recall_f1(tp: int, fp: int, fn: int) -> dict[str, float]:
@@ -130,3 +134,69 @@ def binary_accuracy_at_threshold(
 
     y_pred = (y_s >= float(threshold)).astype(np.int32)
     return float(np.mean(y_pred == y_t))
+
+
+def compute_gt_span_metrics(
+    pred_spans: list[tuple[int, int]],
+    gt_intervals: list[list[int]],
+) -> dict[str, Any]:
+    """Measure how well predicted frame spans cover GT intervals."""
+
+    if not gt_intervals:
+        return {
+            "num_gt_intervals": 0,
+            "hit_ratio": 0.0,
+            "full80_ratio": 0.0,
+            "mean_best_cover": 0.0,
+            "mean_best_iou": 0.0,
+            "items": [],
+        }
+
+    items: list[dict[str, Any]] = []
+    hit = 0
+    full80 = 0
+    iou_sum = 0.0
+    cover_sum = 0.0
+    for gt_start, gt_end in gt_intervals:
+        gt_start = int(gt_start)
+        gt_end = int(gt_end)
+        gt_len = max(1, gt_end - gt_start + 1)
+        best_cover = 0.0
+        best_iou = 0.0
+        best_span: tuple[int, int] | None = None
+        for pred_start, pred_end in pred_spans:
+            pred_start = int(pred_start)
+            pred_end = int(pred_end)
+            inter_start = max(gt_start, pred_start)
+            inter_end = min(gt_end, pred_end)
+            inter = max(0, inter_end - inter_start + 1)
+            cover = float(inter / gt_len)
+            iou = interval_iou((gt_start, gt_end), (pred_start, pred_end))
+            if cover > best_cover or (abs(cover - best_cover) < 1e-6 and iou > best_iou):
+                best_cover = cover
+                best_iou = iou
+                best_span = (pred_start, pred_end)
+
+        hit += int(best_cover > 0.0)
+        full80 += int(best_cover >= 0.8)
+        iou_sum += best_iou
+        cover_sum += best_cover
+        items.append(
+            {
+                "start_frame": gt_start,
+                "end_frame": gt_end,
+                "best_cover": float(best_cover),
+                "best_iou": float(best_iou),
+                "best_pred_span": list(best_span) if best_span is not None else None,
+            }
+        )
+
+    total_gt = max(1, len(gt_intervals))
+    return {
+        "num_gt_intervals": int(len(gt_intervals)),
+        "hit_ratio": float(hit / total_gt),
+        "full80_ratio": float(full80 / total_gt),
+        "mean_best_cover": float(cover_sum / total_gt),
+        "mean_best_iou": float(iou_sum / total_gt),
+        "items": items,
+    }

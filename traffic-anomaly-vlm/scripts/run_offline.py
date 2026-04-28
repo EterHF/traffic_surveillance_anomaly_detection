@@ -20,9 +20,24 @@ def args_run_offline():
 def main():
     args = args_run_offline()
     orchestrator = Orchestrator(args.cfg)
-    all_nodes = orchestrator.run_offline(args.input_video)
-    print(f"Total detected nodes: {len(all_nodes)}")
-    for i, node in enumerate(all_nodes):
+    result = orchestrator.run_offline(args.input_video)
+    if isinstance(result, dict):
+        print(
+            "video_id={video_id} num_pred_spans={num_pred_spans} "
+            "mean_best_cover={cover:.4f} mean_best_iou={iou:.4f} runtime_sec={runtime:.2f}".format(
+                video_id=result.get("video_id", ""),
+                num_pred_spans=int(result.get("num_pred_spans", 0)),
+                cover=float(result.get("gt_metrics", {}).get("mean_best_cover", 0.0)),
+                iou=float(result.get("gt_metrics", {}).get("mean_best_iou", 0.0)),
+                runtime=float(result.get("runtime_sec", 0.0)),
+            )
+        )
+        return
+    if result is None:
+        print("run_offline finished with no returned nodes")
+        return
+    print(f"Total detected nodes: {len(result)}")
+    for i, node in enumerate(result):
         print(f"Node {i}: span=({node.start_frame}, {node.end_frame}), prior_score={node.span_prior_score}, vlm_score={node.vlm_score}")
 
 

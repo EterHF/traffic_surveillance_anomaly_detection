@@ -1,26 +1,42 @@
 video:
   input_fps: 25
-  fps_sample: 25
+  fps_sample: 12
   resize_max_side: 640
   resize_interpolation: "area"
-  window_size: 16
+  window_size: 8
   window_step: 1
+  SAVE_ALL_TRACKS: true
+  PLOT_ALL_SUBSCORES: true
+  SAVE_TRACK_VIDEOS: true
+
+
+score_postprocess:
+  smooth_window: 3
 
 perception:
-  model_path: "weights/yolo26n.pt"
-  tracker: "bytetrack.yaml"
-  conf: 0.25
+  model_path: "weights/yolo26/yolo26x.pt"
+  tracker: "configs/botsort.yaml"
+  conf: 0.2
   iou: 0.5
-  classes: [0, 1, 2, 3, 5, 7]
+  classes: [0, 1, 2, 3, 5, 6, 7]
 
 track_refiner:
   enable: true
-  max_frame_gap: 8
+  max_frame_gap: 6
   max_center_dist: 0.06
   max_size_ratio: 2.5
   min_direction_cos: -0.1
   max_speed_ratio: 3.5
   gap_relax_factor: 0.20
+  min_track_len: 6
+  min_track_span: 12
+  min_box_area: 20.0
+  min_area_ratio: 0.0005
+
+track_features:
+  fit_degree: 2
+  # null means use current window_size
+  history_len: null
 
 vlm:
   enable: true
@@ -45,11 +61,6 @@ pure_vlm_baseline:
   min_interval_len: 10
   merge_gap: 8
 
-track_features:
-  fit_degree: 3
-  # null means use current window_size
-  history_len: null
-
 scene_features:
   lowres_size: 32
   occupancy_grid: 4
@@ -73,7 +84,10 @@ scene_features:
 output:
   save_assets: true
   save_json: true
-  output_dir: "outputs/"
+  output_dir: "outputs/test"
+
+evaluation:
+  manifest_path: "/nvme2/VAD_yemao/data/TU-DAT-25/abnormal.txt"
 
 tree_build_config:
   max_depth: 3
@@ -84,33 +98,28 @@ tree_build_config:
   merge_gap: 10
   per_level_high_z: [1.0, 0.6, 0.3]
   min_output_span: 8
-  use_savgol_filter: false
   refine_coarse: true
-  prompt_method: "single_stage"
+  prompt_method: "single_stage" # "single_stage" or "two_stage"
 
 tree_refine_config:
-  min_confidence: 0.35,
+  min_confidence: 0.35
   prior_weight: 0.4
   vlm_weight: 0.6
+  positive_threshold: 0.5
 
 boundary_detector:
-  high: null
-  low: null
-  online: false
-  use_savgol_filter: false
-  method: "by_peeks"
-  # Robust z-score parameters for adaptive thresholding.
-  high_z: 1.0
-  low_z: 0.5
-  factor_online: 0.3
-  # Peak/span post-process parameters.
-  peak_gap: 5
-  peak_expand: [12, 25]
-  min_span_len: 12
-  merge_gap: 25
-  savgol_window: 7
-  savgol_polyorder: 3
+  # Start from median + high_z * MAD-sigma, then relax/trim peak count.
+  high_z: 0.85
+  # Null-aware gate may produce no reliable evidence; avoid forcing noise peaks.
+  min_peak_score: 0.15
+  min_peaks: 5
+  max_peaks: 10
+  # Peak-centered spans, in sampled-frame units.
+  peak_gap: 2
+  peak_expand: [8, 12]
+  # Greedy de-duplication: overlapping spans, or spans within this gap, keep one.
+  merge_gap: 0
 
 evidence_builder:
   assets_subdir: "assets"
-  method: "montage" # "montage" or "enhanced"
+  method: "montage" # "montage", "frames", or "enhanced"

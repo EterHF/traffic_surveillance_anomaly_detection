@@ -3,11 +3,29 @@ from __future__ import annotations
 import json
 
 
-def build_stage1_prompt(summary: dict) -> str:
+def _evidence_desc(evidence_method: str) -> str:
+    if evidence_method == "montage":
+        return "a montage image composed of sampled frames in time order"
+    if evidence_method == "frames":
+        return "multiple sampled frames in time order"
+    if evidence_method == "enhanced":
+        return "multiple sampled frames with object tracks, boxes, ids, and trajectory overlays"
+    return "visual evidence from a candidate traffic segment"
+
+
+def build_stage1_prompt(summary: dict, evidence_method: str = "montage") -> str:
     return (
-        "You are an expert traffic analyst. "
-        "Describe the scene neutrally: actors, motion, and key spatial-temporal relations. "
-        f"Structured summary: {summary}"
+        "You are an expert traffic analyst.\n\n"
+        "You are given a candidate traffic segment.\n"
+        f"The visual evidence is { _evidence_desc(evidence_method) }.\n"
+        "Do not decide anomaly score yet. First summarize what is happening.\n\n"
+        f"Structured summary: {json.dumps(summary, ensure_ascii=False)}\n\n"
+        "Return JSON only with keys:\n"
+        "- scene_summary: one short sentence\n"
+        "- main_objects: short list of visible road users or objects\n"
+        "- motion_summary: one short sentence about movement and interaction\n"
+        "- anomaly_hint: one of [\"normal\", \"possibly_abnormal\", \"clearly_abnormal\"]\n"
+        "- evidence_tags: short list such as [\"setup\", \"impact\", \"aftermath\", \"context\", \"occlusion\"]\n"
     )
 
 

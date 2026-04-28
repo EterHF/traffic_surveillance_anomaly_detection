@@ -158,7 +158,6 @@ class CLIPFeatureExtractor:
         cosine_error = (1.0 - cosine_sim).astype(np.float32)
         l2_error = np.sqrt(np.maximum(sq_l2_error, 0.0)).astype(np.float32)
         combined = (sq_l2_error + cosine_error).astype(np.float32)
-
         delta = np.zeros_like(cosine_error)
         delta[1:] = np.abs(cosine_error[1:] - cosine_error[:-1])
         return {

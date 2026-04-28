@@ -117,3 +117,49 @@ def build_labeled_montage(tiles: list[np.ndarray], labels: list[str], thumb_size
     top = np.hstack(rendered[:2])
     bottom = np.hstack(rendered[2:4])
     return np.vstack([top, bottom])
+
+
+def filter_tracks_by_frame(
+    tracks: list[TrackObject],
+    frame_id: int,
+) -> list[TrackObject]:
+    return [track for track in tracks if int(track.frame_id) == int(frame_id)]
+
+
+def draw_track_annotations(
+    frame: np.ndarray,
+    frame_tracks: list[TrackObject],
+    span_tracks: list[TrackObject] | None = None,
+) -> np.ndarray:
+    canvas = frame.copy()
+    span_tracks = span_tracks or []
+
+    history_by_id: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for track in span_tracks:
+        history_by_id[int(track.track_id)].append((int(track.cx), int(track.cy)))
+
+    for track_id, points in history_by_id.items():
+        if len(points) < 2:
+            continue
+        color = ((track_id * 37) % 255, (track_id * 67) % 255, (track_id * 97) % 255)
+        for idx in range(1, len(points)):
+            cv2.line(canvas, points[idx - 1], points[idx], color, 2, cv2.LINE_AA)
+
+    for track in frame_tracks:
+        x1, y1, x2, y2 = [int(round(v)) for v in track.bbox_xyxy]
+        track_id = int(track.track_id)
+        color = ((track_id * 37) % 255, (track_id * 67) % 255, (track_id * 97) % 255)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        label = f"id={track_id} {track.cls_name}"
+        cv2.putText(
+            canvas,
+            label,
+            (x1, max(18, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.circle(canvas, (int(track.cx), int(track.cy)), 3, color, -1)
+    return canvas

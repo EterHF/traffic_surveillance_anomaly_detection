@@ -3,23 +3,31 @@ from __future__ import annotations
 import json
 
 
-def build_span_score_prompt(summary: dict) -> str:
-    """Prompt for reusable span scoring on both coarse and fine candidates."""
+def _evidence_desc(evidence_method: str) -> str:
+    if evidence_method == "montage":
+        return "a single montage image composed of sampled frames in chronological order"
+    if evidence_method == "frames":
+        return "multiple sampled frames in chronological order"
+    if evidence_method == "enhanced":
+        return "multiple sampled frames with tracked objects, ids, boxes, and trajectory overlays"
+    return "chronological visual evidence from a candidate traffic segment"
+
+
+def build_span_score_prompt(summary: dict, evidence_method: str = "montage") -> str:
+    """Single-stage prompt for direct span-level anomaly scoring."""
 
     return (
         "You are a traffic anomaly scoring assistant.\n\n"
-        "You are given a candidate segment from a short traffic surveillance clip.\n"
-        "The image is a montage of sampled frames in chronological order.\n"
-        "Your task is to estimate how likely this segment contains the core abnormal traffic event.\n\n"
+        "You are given a candidate traffic segment.\n"
+        f"The visual evidence is { _evidence_desc(evidence_method) }.\n"
+        "This segment may show setup, impact, aftermath, or only normal context.\n\n"
         f"Structured summary: {json.dumps(summary, ensure_ascii=False)}\n\n"
         "Return JSON only with keys:\n"
-        "- anomaly_score: float in [0,1], where 0 means normal/context and 1 means clearly abnormal core segment\n"
+        "- anomaly_score: float in [0,1]\n"
         "- confidence: float in [0,1]\n"
         "- reason: one short sentence\n\n"
         "Rules:\n"
         "- Output JSON only.\n"
-        "- Use the prior_score in the summary only as a weak hint, not as the final answer.\n"
-        "- Score high when the sampled frames likely contain the abnormal body, setup or aftermath.\n"
-        "- If the segment looks mostly normal or ambiguous, return a moderate or low anomaly_score.\n"
+        "- High score means the segment likely contains meaningful abnormal evidence, not necessarily only the impact moment.\n"
+        "- Use the summary only as a weak hint.\n"
     )
-

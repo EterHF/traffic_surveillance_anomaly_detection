@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class TreeBuildConfig:
-    """Recursive split settings for pure event-tree construction."""
+    """Bottom-up merge settings for pure event-tree construction."""
 
     max_depth: int = 3
     min_span_len: int = 8
@@ -15,7 +15,6 @@ class TreeBuildConfig:
     merge_gap: int = 10
     per_level_high_z: tuple[float, ...] = (1.0, 0.6, 0.3)
     min_output_span: int = 8
-    use_savgol_filter: bool = False
 
     refine_coarse: bool = True
     prompt_method: str = "single_stage"

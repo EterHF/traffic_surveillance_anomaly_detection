@@ -154,7 +154,24 @@ def parse_span_score_output(raw: str) -> dict[str, Any]:
 
 
 def parse_span_score_output_for_stage1(raw: str) -> dict[str, Any]:
-    pass
+    obj = _extract_json_obj(raw)
+    anomaly_hint = str(obj.get("anomaly_hint", "normal"))
+    if anomaly_hint not in {"normal", "possibly_abnormal", "clearly_abnormal"}:
+        anomaly_hint = "normal"
+    return {
+        "scene_summary": str(obj.get("scene_summary", "")),
+        "main_objects": [str(x) for x in obj.get("main_objects", [])]
+        if isinstance(obj.get("main_objects"), list)
+        else [],
+        "motion_summary": str(obj.get("motion_summary", "")),
+        "anomaly_hint": anomaly_hint,
+        "evidence_tags": [str(x) for x in obj.get("evidence_tags", [])]
+        if isinstance(obj.get("evidence_tags"), list)
+        else [],
+    }
 
 def parse_span_score_output_for_stage2(raw: str) -> dict[str, Any]:
-    pass
+    parsed = parse_span_score_output(raw)
+    obj = _extract_json_obj(raw)
+    parsed["evidence_tags"] = [str(x) for x in obj.get("evidence_tags", [])] if isinstance(obj.get("evidence_tags"), list) else []
+    return parsed

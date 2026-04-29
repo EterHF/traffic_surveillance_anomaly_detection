@@ -88,37 +88,27 @@ output:
 
 evaluation:
   manifest_path: "/nvme2/VAD_yemao/data/TU-DAT-25/abnormal.txt"
+  input_root: "/nvme2/VAD_yemao/data/TU-DAT-25/videos/abnormal"
 
-tree_build_config:
-  max_depth: 3
-  min_span_len: 8
-  split_min_len: 16
-  peak_gap: 5
-  peak_expand: [10, 15]
-  merge_gap: 10
-  per_level_high_z: [1.0, 0.6, 0.3]
-  min_output_span: 8
-  refine_coarse: true
+span_refine_config:
   prompt_method: "single_stage" # "single_stage" or "two_stage"
-
-tree_refine_config:
   min_confidence: 0.35
-  prior_weight: 0.4
-  vlm_weight: 0.6
   positive_threshold: 0.5
+  merge_gap: 10
 
 boundary_detector:
   # Start from median + high_z * MAD-sigma, then relax/trim peak count.
   high_z: 0.85
   # Null-aware gate may produce no reliable evidence; avoid forcing noise peaks.
   min_peak_score: 0.15
+  # deprecated
   min_peaks: 5
   max_peaks: 10
-  # Peak-centered spans, in sampled-frame units.
-  peak_gap: 2
-  peak_expand: [8, 12]
-  # Greedy de-duplication: overlapping spans, or spans within this gap, keep one.
-  merge_gap: 0
+  # Peak-centered spans; values are actual frame-id units in the main pipeline.
+  peak_gap: 4
+  peak_expand: [4, 8]
+  # Greedy de-duplication: overlapping spans, or spans within this actual frame-id gap, keep one.
+  merge_gap: 12
 
 evidence_builder:
   assets_subdir: "assets"

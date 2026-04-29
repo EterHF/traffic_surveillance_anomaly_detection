@@ -7,7 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.schemas import EventNode, TrackObject, WindowFeature
+from src.schemas import SpanProposal, TrackObject
 
 
 def load_frame_ref(frame_ref: Any) -> np.ndarray | None:
@@ -22,29 +22,27 @@ def save_image(path: str, image: np.ndarray) -> str:
     return path
 
 
-def select_keyframes(node: EventNode, n: int = 4) -> list[int]:
-    if node.end_frame <= node.start_frame:
-        return [node.start_frame]
-    span = node.end_frame - node.start_frame
-    step = max(1, span // max(n - 1, 1))
-    picks = [node.start_frame + i * step for i in range(n)]
-    picks[-1] = node.end_frame
-    if node.peak_frame not in picks:
-        picks[min(len(picks) - 1, n // 2)] = node.peak_frame
+def select_keyframes(span: SpanProposal, n: int = 4) -> list[int]:
+    if span.end_frame <= span.start_frame:
+        return [span.start_frame]
+    frame_span = span.end_frame - span.start_frame
+    step = max(1, frame_span // max(n - 1, 1))
+    picks = [span.start_frame + i * step for i in range(n)]
+    picks[-1] = span.end_frame
+    if span.peak_frame not in picks:
+        picks[min(len(picks) - 1, n // 2)] = span.peak_frame
     return sorted(set(picks))
 
 
-def build_event_summary(node: EventNode) -> dict:
-    # related = [window for window in windows if window.start_frame >= node.start_frame and window.end_frame <= node.end_frame]
-    # mean_trigger = sum(window.trigger_score for window in related) / max(len(related), 1)
+def build_event_summary(span: SpanProposal) -> dict:
     return {
-        "event_id": node.node_id,
-        "start_frame": node.start_frame,
-        "end_frame": node.end_frame,
-        "peak_frame": node.peak_frame,
-        "eventness_peak": float(node.eventness_peak),
-        "eventness_mean": float(node.eventness_mean),
-        "span_prior_score": float(node.span_prior_score),
+        "event_id": span.span_id,
+        "start_frame": span.start_frame,
+        "end_frame": span.end_frame,
+        "peak_frame": span.peak_frame,
+        "eventness_peak": float(span.eventness_peak),
+        "eventness_mean": float(span.eventness_mean),
+        "span_prior_score": float(span.prior_score),
         # "mean_trigger": mean_trigger,
         # "window_count": len(related),
     }

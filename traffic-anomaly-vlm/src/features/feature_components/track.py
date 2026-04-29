@@ -8,27 +8,30 @@ import numpy as np
 from src.schemas import TrackObject
 
 
-STATIC_MOVE_RATIO = 0.10
-DISAPPEAR_FAR_EDGE_RATIO = 0.20
+STATIC_MOVE_RATIO = 0.30
+DISAPPEAR_FAR_EDGE_RATIO = 0.18
+DISAPPEAR_LOOKAHEAD = 2
+DISAPPEAR_MIN_TRACK_LEN = 3
 TURN_CHANGE_RATIO = 0.5
+# Diagnostic scale for speeds_mean only; anomaly priors use normalized motion.
 SPEED_SCALING_FACTOR = 15.0
 # Motion thresholds are normalized by object size, so near/far objects share a
 # comparable turn prior. The pixel floor still filters detector jitter.
 MIN_TURN_SPEED_RATIO = 0.03
-MIN_DIR_MOTION_RATIO = 0.05
+MIN_DIR_MOTION_RATIO = 0.03
 MIN_DIR_MOTION_PX = 2.0
 # Sum-like priors are aggregated by top-k mean to reduce object-count bias.
 TOPK_AGG_COUNT = 3
 # Ignore motion priors when the box is clipped, strongly resized, or jumps too
 # far for its scale; these are usually tracker artifacts rather than behavior.
-EDGE_UNSTABLE_RATIO = 0.05
+EDGE_UNSTABLE_RATIO = 0.03
 MAX_MOTION_AREA_RATIO = 1.5
-MAX_STEP_RATIO = 1.2
+MAX_STEP_RATIO = 1.0
 REPLACEMENT_CENTER_RATIO = 0.06
 REPLACEMENT_IOU = 0.05
-# Pure bottom-center is sensitive to truncated boxes near the image edge. Use a
-# lower-center anchor that still follows ground motion better than bbox center.
-TRACK_POINT_Y_RATIO = 0.70
+# Pure bottom-center is sensitive to truncated boxes. A mildly lower center
+# keeps some ground-motion cue without letting bbox height jitter dominate.
+TRACK_POINT_Y_RATIO = 0.60
 
 MotionFit = tuple[tuple[float, float], tuple[float, float], tuple[float, float] | None]
 
@@ -111,6 +114,13 @@ def _has_near_replacement(
         if _iou_xyxy(last_track.bbox_xyxy, candidate.bbox_xyxy) >= REPLACEMENT_IOU:
             return True
     return False
+
+
+def _frame_dims_from_window(window_tracks: list[list[TrackObject]]) -> tuple[float, float]:
+    for frame_tracks in reversed(window_tracks):
+        if frame_tracks:
+            return float(frame_tracks[0].frame_w), float(frame_tracks[0].frame_h)
+    return 640.0, 480.0
 
 
 def _box_from_track_point(track: TrackObject, point: tuple[float, float]) -> list[float]:
@@ -214,6 +224,18 @@ def _distance_to_nearest_edge(x: float, y: float, frame_w: float, frame_h: float
     return float(min(x_clamped, frame_w - x_clamped, y_clamped, frame_h - y_clamped))
 
 
+def _disappear_far_score(track: TrackObject, frame_w: float, frame_h: float, frame_diag: float) -> float:
+    px, py = _track_point(track)
+    d_norm = _distance_to_nearest_edge(px, py, frame_w, frame_h) / max(1.0, frame_diag)
+    return float(
+        np.clip(
+            (d_norm - EDGE_UNSTABLE_RATIO) / max(1e-6, DISAPPEAR_FAR_EDGE_RATIO - EDGE_UNSTABLE_RATIO),
+            0.0,
+            1.0,
+        )
+    )
+
+
 def build_track_features(
     window_tracks: list[list[TrackObject]],
     fit_degree: int = 3,
@@ -224,7 +246,7 @@ def build_track_features(
         for t in frame_tracks:
             by_id[t.track_id].append(t)
 
-    frame_w, frame_h = window_tracks[-1][0].frame_w, window_tracks[-1][0].frame_h if window_tracks and window_tracks[-1] else (640, 480)   
+    frame_w, frame_h = _frame_dims_from_window(window_tracks)
 
     frame_diag = max(1.0, math.hypot(frame_w, frame_h))
     window_len = len(window_tracks)
@@ -248,25 +270,31 @@ def build_track_features(
         if _is_static_full_window(seq, window_len)
     }
 
-    # Tracks that disappear away from the frame edge are stronger anomaly signals.
+    # Confirm disappearance with a short lookahead. A one-frame miss or delayed
+    # ID switch should not look like an object vanishing in the scene center.
     for i in range(max(0, len(window_tracks) - 1)):
         cur_map = {t.track_id: t for t in window_tracks[i] if t.track_id not in static_ids}
-        nxt_tracks = [t for t in window_tracks[i + 1] if t.track_id not in static_ids]
-        nxt_ids = {t.track_id for t in nxt_tracks}
+        lookahead_tracks = [
+            t
+            for frame_tracks in window_tracks[i + 1 : i + 1 + DISAPPEAR_LOOKAHEAD]
+            for t in frame_tracks
+            if t.track_id not in static_ids
+        ]
+        future_ids = {t.track_id for t in lookahead_tracks}
         cur_ids = set(cur_map.keys())
         if not cur_ids:
             continue
-        disappeared = cur_ids - nxt_ids
+        disappeared = cur_ids - future_ids
         for tid in disappeared:
             last_t = cur_map[tid]
-            if len(by_id.get(tid, [])) < fit_hist:
+            observed_len = sum(1 for t in by_id.get(tid, []) if int(t.frame_id) <= int(last_t.frame_id))
+            if observed_len < DISAPPEAR_MIN_TRACK_LEN:
                 continue
-            if _has_near_replacement(last_t, nxt_tracks, frame_diag):
+            if _has_near_replacement(last_t, lookahead_tracks, frame_diag):
                 continue
-            px, py = _track_point(last_t)
-            d_edge = _distance_to_nearest_edge(px, py, frame_w, frame_h)
-            d_norm = d_edge / frame_diag
-            disappear_far_flags.append(1.0 if d_norm > DISAPPEAR_FAR_EDGE_RATIO else 0.0)
+            score = _disappear_far_score(last_t, frame_w, frame_h, frame_diag)
+            if score > 0.0:
+                disappear_far_flags.append(score)
 
     filtered_by_id = {
         tid: sorted(seq, key=lambda x: x.frame_id)
@@ -379,7 +407,7 @@ def build_track_features(
     pred_iou_max_err = max(current_pred_iou_errs, default=0.0)
     speed_turn_rates_max = max(speed_turn_rates) if speed_turn_rates else 0.0
     dir_turn_rates_max = max(dir_turn_rates) if dir_turn_rates else 0.0
-    disappear_far_sum = sum(disappear_far_flags)
+    disappear_far_sum = _topk_mean(disappear_far_flags)
 
     return {
         "track_count": float(len(filtered_by_id)),

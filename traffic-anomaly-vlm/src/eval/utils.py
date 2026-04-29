@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.schemas import EventNode
+from src.schemas import SpanProposal
 
 
 def list_frame_paths(frame_dir: str) -> list[str]:
@@ -65,8 +65,8 @@ def robust_unit_scale(values: np.ndarray) -> np.ndarray:
     return np.clip(z / hi, 0.0, 1.0)
 
 
-def summarize_gt_overlap(selected_nodes: list[EventNode], gt_intervals: list[list[int]]) -> dict:
-    selected = [(int(n.start_frame), int(n.end_frame)) for n in selected_nodes]
+def summarize_gt_overlap(selected_spans: list[SpanProposal], gt_intervals: list[list[int]]) -> dict:
+    selected = [(int(span.start_frame), int(span.end_frame)) for span in selected_spans]
     gt_summary: list[dict] = []
     hit = 0
     for s, e in gt_intervals:

@@ -62,6 +62,18 @@ def extract_intervals(mask: np.ndarray, min_len: int = 1, merge_gap: int = 0) ->
     return [[s, e] for s, e in merged if (e - s + 1) >= min_len]
 
 
+def interval_indices_to_frame_ids(intervals: list[list[int]], frame_ids: list[int]) -> list[list[int]]:
+    if not frame_ids:
+        return []
+    out: list[list[int]] = []
+    last_idx = len(frame_ids) - 1
+    for start, end in intervals:
+        start_idx = max(0, min(int(start), last_idx))
+        end_idx = max(0, min(int(end), last_idx))
+        out.append([int(frame_ids[start_idx]), int(frame_ids[end_idx])])
+    return out
+
+
 class PureVLMBaselinePipeline:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -128,13 +140,7 @@ class PureVLMBaselinePipeline:
         frame_items = [(int(fid), str(path)) for fid, path in reader.frame_items]
         if not frame_items:
             raise ValueError(f"No frames found from source: {frame_source}")
-
-        # If frame ids are not contiguous, remap to a stable sequential axis.
-        frame_ids = [fid for fid, _ in frame_items]
-        is_contiguous = all((frame_ids[i + 1] - frame_ids[i]) == 1 for i in range(len(frame_ids) - 1))
-        if is_contiguous and frame_ids[0] == 0:
-            return frame_items
-        return [(i, p) for i, (_, p) in enumerate(frame_items)]
+        return frame_items
 
     def _smooth_scores(self, frame_scores: np.ndarray) -> np.ndarray:
         if frame_scores.size == 0:
@@ -256,11 +262,12 @@ class PureVLMBaselinePipeline:
 
         frame_scores_smooth = self._smooth_scores(frame_scores_raw)
         pred_mask = frame_scores_smooth > float(self.threshold)
-        intervals = extract_intervals(
+        interval_indices = extract_intervals(
             pred_mask,
             min_len=max(1, int(self.min_interval_len)),
             merge_gap=max(0, int(self.merge_gap)),
         )
+        intervals = interval_indices_to_frame_ids(interval_indices, frame_ids)
 
         video_total_sec = float(time.perf_counter() - video_t0)
         num_windows = len(window_results)
@@ -282,6 +289,7 @@ class PureVLMBaselinePipeline:
             "window_results": window_results,
             "frame_scores_raw": frame_scores_raw.tolist(),
             "frame_scores_smooth": frame_scores_smooth.tolist(),
+            "predicted_interval_indices": interval_indices,
             "predicted_intervals": intervals,
             "coverage": {
                 "covered_frames": covered_frames,

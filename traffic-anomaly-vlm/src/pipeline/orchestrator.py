@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-import json
 from pathlib import Path
 import subprocess
 import time
@@ -10,7 +9,7 @@ import cv2
 import numpy as np
 from tqdm.auto import tqdm
 
-from src.schemas import EventNode, TrackObject, WindowFeature
+from src.schemas import TrackObject, WindowFeature
 from src.settings import load_settings, instantiate_from_config
 from src.core.utils import get_logger, write_json
 from src.core.video_io import build_reader
@@ -22,11 +21,9 @@ from src.perception.track_refiner import refine_track_ids
 from src.features.feature_builder import FeatureBuilder, SCENE_FEATURE_WEIGHTS, build_window_score_curves
 from src.vlm.model_loader import LocalVLM
 from src.proposals.boundary_detector import BoundaryDetector
-from src.proposals.tree_pipeline import TreePipeline
+from src.proposals.tree_pipeline import refine_spans_with_vlm
 
-from src.eval.metrics import compute_gt_span_metrics
 from src.eval.visualize import plot_all_subscores, plot_peaks, plot_scores
-from src.eval.utils import parse_manifest_intervals
 
 
 
@@ -73,17 +70,7 @@ class Orchestrator:
             }
 
         self.boundary_detector_cfg = self.cfg_instances.get("boundary_detector")
-        # self.vlm = LocalVLM(self.cfg_instances["vlm"])
-        # self.tree_pipeline = TreePipeline(
-        #     vlm=self.vlm,
-        #     tree_build_cfg=self.cfg_instances["tree_build_config"],
-        #     boundary_cfg=self.boundary_detector_cfg,
-        #     min_confidence=float(self.cfg.tree_refine_config.min_confidence),
-        #     prior_weight=float(self.cfg.tree_refine_config.prior_weight),
-        #     vlm_weight=float(self.cfg.tree_refine_config.vlm_weight),
-        #     positive_threshold=float(self.cfg.tree_refine_config.positive_threshold),
-        #     output_assets_dir=str(self.assets_dir),
-        # )
+        self.vlm = LocalVLM(self.cfg_instances["vlm"])
         self.logger.info("Orchestrator initialized with config: %s", cfg_path)
 
     @staticmethod
@@ -95,6 +82,7 @@ class Orchestrator:
         kernel = np.ones((int(window),), dtype=np.float32) / float(window)
         return np.convolve(padded, kernel, mode="valid").astype(np.float32)
 
+    # For currently window_step = 1
     def _dense_score_curves(self, windows: list[WindowFeature], num_frames: int) -> dict[str, np.ndarray]:
         if num_frames <= 0:
             empty = np.zeros((0,), dtype=np.float32)
@@ -215,12 +203,130 @@ class Orchestrator:
             raft_weight=SCENE_FEATURE_WEIGHTS.get("raft_eventness", 0.0),
         )
 
-    def run_offline(self, input_video: str):
+    def run_manifest(
+        self,
+        manifest_path: str | None = None,
+        input_root: str | None = None,
+        max_videos: int | None = None,
+    ) -> dict[str, Any]:
+        if not manifest_path:
+            manifest_path = str(getattr(getattr(self.cfg, "evaluation", None), "manifest_path", "") or "")
+        if not manifest_path:
+            raise ValueError("cfg.evaluation.manifest_path is empty")
+
+        if input_root is None:
+            evaluation_cfg = getattr(self.cfg, "evaluation", None)
+            cfg_root = str(getattr(evaluation_cfg, "input_root", "") or "") if evaluation_cfg is not None else ""
+            if cfg_root:
+                input_root = cfg_root
+
+        items = self._load_manifest_items(manifest_path, input_root=input_root)
+        if max_videos is not None and int(max_videos) > 0:
+            items = items[: int(max_videos)]
+
+        results: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
+        run_t0 = time.perf_counter()
+        for item in tqdm(items, desc="offline manifest", dynamic_ncols=True):
+            video_id = str(item["video_id"])
+            input_video = str(item["input_video"])
+            # Reset 
+            try:
+                result = self.run_offline(
+                    input_video=input_video,
+                    video_id=video_id,
+                )
+                results.append(result)
+            except Exception as exc:
+                self.logger.exception("Failed to process %s from %s", video_id, input_video)
+                failed.append(
+                    {
+                        "video_id": video_id,
+                        "input_video": input_video,
+                        "error": str(exc),
+                    }
+                )
+
+        input_root_value = str(Path(input_root).expanduser()) if input_root else ""
+        summary = {
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "input_root": input_root_value,
+            "num_items": int(len(items)),
+            "num_completed": int(len(results)),
+            "num_skipped": int(len(skipped)),
+            "num_failed": int(len(failed)),
+            "runtime_sec": float(time.perf_counter() - run_t0),
+            "results": results,
+            "skipped": skipped,
+            "failed": failed,
+        }
+        write_json(str(self.results_dir / "manifest_summary.json"), summary)
+        return summary
+
+    def _load_manifest_items(
+        self,
+        manifest_path: str,
+        input_root: str | None = None,
+    ) -> list[dict[str, str]]:
+        path = Path(manifest_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+        root = Path(input_root).expanduser() if input_root else None
+        if root is not None and not root.exists():
+            raise FileNotFoundError(f"input_root not found: {root}")
+
+        def _resolve_token(token: str) -> Path:
+            source = Path(token)
+            if source.is_absolute():
+                base = source
+            else:
+                if root is None:
+                    raise ValueError("input_root is required for relative manifest entries")
+                base = root / source
+            if base.exists():
+                return base
+            if base.suffix:
+                return base
+            for suffix in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
+                candidate = base.with_suffix(suffix)
+                if candidate.exists():
+                    return candidate
+            return base
+
+        items: list[dict[str, str]] = []
+        for line_idx, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            text = raw_line.strip()
+            if not text or text.startswith("#"):
+                continue
+            try:
+                token = text.split()[0]
+                resolved = _resolve_token(token)
+                if not resolved.exists():
+                    raise FileNotFoundError(f"Input source not found: {resolved}")
+                items.append({
+                    "video_id": resolved.stem,
+                    "input_video": str(resolved),
+                })
+            except Exception as exc:
+                raise ValueError(f"Manifest parse error at line {line_idx}: {exc}") from exc
+
+        if not items:
+            raise ValueError(f"No valid videos found in manifest: {manifest_path}")
+        return items
+
+
+    def run_offline(
+        self,
+        input_video: str,
+        video_id: str | None = None,
+    ):
         start_time = time.perf_counter()
         if not input_video:
             raise ValueError("input_video is empty")
         # Make subdirs for current video
-        video_id = Path(input_video).stem
+        video_id = str(video_id or Path(input_video).stem)
         cur_output_dir = self.results_dir / video_id
         cur_output_dir.mkdir(parents=True, exist_ok=True)
         cur_assets_dir = self.assets_dir / video_id
@@ -246,13 +352,13 @@ class Orchestrator:
         sampled_detection_results: list[Any] = []
 
         try:
-            self.logger.info("Start sampling frames and tracking...")
+            self.logger.info("Start sampling frames and caching...")
             total_frames = int(reader.frame_count())
             total_sampled = None if total_frames <= 0 else (total_frames + sampler.stride - 1) // sampler.stride
             for frame_id, frame in tqdm(
                 sampler.sample(iter(reader)),
                 total=total_sampled,
-                desc=f"{video_id}: sample+track",
+                desc=f"{video_id}: sample+cache",
                 dynamic_ncols=True,
             ):
                 sampled_frame_ids.append(frame_id)
@@ -260,15 +366,24 @@ class Orchestrator:
                 cv2.imwrite(str(frame_path), frame)
                 sampled_frames[frame_id] = str(frame_path)
                 sampled_frame_paths.append(str(frame_path))
-
-                results = self.detector_tracker.track_frame(frame, persist=True)
-                if self.cfg.video.SAVE_TRACK_VIDEOS:
-                    sampled_detection_results.append(results)
-                tracks = parse_ultralytics_results(results, frame_id)
-                sampled_tracks_raw.append(tracks)
         finally:
             reader.release()
-            self.logger.info(f"Finished tracking and caching sampled frames. Total sampled frames: {len(sampled_frame_ids)}")
+            self.logger.info(f"Finished caching sampled frames. Total sampled frames: {len(sampled_frame_ids)}")
+
+        self.logger.info("Start tracking on cached frames...")
+        # import ipdb; ipdb.set_trace()
+        for frame_id, frame_path in tqdm(
+            zip(sampled_frame_ids, sampled_frame_paths),
+            total=len(sampled_frame_ids),
+            desc=f"{video_id}: track",
+            dynamic_ncols=True,
+        ):
+            results = self.detector_tracker.track_frame(frame_path, persist=True)
+            if self.cfg.video.SAVE_TRACK_VIDEOS:
+                sampled_detection_results.append(results)
+            tracks = parse_ultralytics_results(results, frame_id)
+            sampled_tracks_raw.append(tracks)
+        self.logger.info(f"Finished tracking sampled frames. Total tracked frames: {len(sampled_tracks_raw)}")
 
         sampled_tracks = sampled_tracks_raw
         track_refine_map: dict[int, int] = {}
@@ -378,9 +493,6 @@ class Orchestrator:
         scores = curves["dense_trigger"].tolist()
         assert len(scores) == len(sampled_frame_ids), f"Length of scores ({len(scores)}) should match length of sampled frames ({len(sampled_frame_ids)})"
 
-        manifest_path = str(getattr(getattr(self.cfg, "evaluation", None), "manifest_path", "") or "")
-        gt_intervals = parse_manifest_intervals(manifest_path, video_id) if manifest_path else []
-
         # plot all subscores
         if self.cfg.video.PLOT_ALL_SUBSCORES:
             all_subscores = {}
@@ -425,13 +537,16 @@ class Orchestrator:
                 plot_all_subscores(
                     frame_ids=sampled_frame_ids,
                     subscores=all_subscores,
-                    gt_intervals=gt_intervals,
+                    gt_intervals=None,
                     title="All Subscores",
                     output_dir=str(cur_output_dir),
                     filename="all_subscores.png",
                 )
 
-        boundary_result = BoundaryDetector(self.boundary_detector_cfg).detect_details(scores)
+        boundary_result = BoundaryDetector(self.boundary_detector_cfg).detect_details(
+            scores,
+            frame_ids=sampled_frame_ids,
+        )
         peaks = boundary_result.peaks
         coarse_spans = boundary_result.spans
         coarse_frame_spans = self._frame_spans_from_indices(sampled_frame_ids, coarse_spans)
@@ -447,10 +562,26 @@ class Orchestrator:
             scores=curves["dense_trigger"],
             frame_ids=sampled_frame_ids,
             pred_spans=coarse_frame_spans,
-            gt_intervals=gt_intervals,
+            gt_intervals=None,
             output_dir=str(cur_output_dir),
         )
         self.logger.info(f"Score plot saved to {cur_output_dir}")
+
+        final_spans = refine_spans_with_vlm(
+            vlm=self.vlm,
+            frame_spans=coarse_frame_spans,
+            images=sampled_frame_paths,
+            frame_ids=sampled_frame_ids,
+            all_tracks=[track for frame_tracks in sampled_tracks for track in frame_tracks],
+            eventness_scores=scores,
+            method=str(self.cfg.evidence_builder.method),
+            output_assets_dir=str(cur_assets_dir),
+            prompt_method=str(self.cfg.span_refine_config.prompt_method),
+            min_confidence=float(self.cfg.span_refine_config.min_confidence),
+            positive_threshold=float(self.cfg.span_refine_config.positive_threshold),
+            merge_gap=int(self.cfg.span_refine_config.merge_gap),
+        )
+        self.logger.info("Span refinement finished with %d positive spans.", len(final_spans))
 
         # Delete cached sampled frames to save space
         for frame_path in sampled_frame_paths:
@@ -460,44 +591,49 @@ class Orchestrator:
                 self.logger.warning(f"Failed to delete cached frame {frame_path}: {e}")
 
         runtime_sec = float(time.perf_counter() - start_time)
+
+        # Logging
+        write_json(str(cur_output_dir / "config_used.json"), self.cfg.to_dict())
         result = {
             "video_id": video_id,
             "num_sampled_frames": int(len(sampled_frame_ids)),
             "num_windows": int(len(windows)),
             "num_pred_spans": int(len(coarse_frame_spans)),
+            "num_final_spans": int(len(final_spans)),
             "peaks_idx": [int(v) for v in peaks],
             "peaks_frame": [int(sampled_frame_ids[v]) for v in peaks if 0 <= int(v) < len(sampled_frame_ids)],
             "core_spans_idx": [[int(s), int(e)] for s, e in coarse_spans],
             "core_spans_frame": [[int(s), int(e)] for s, e in coarse_frame_spans],
             "thresholds": {str(k): float(v) for k, v in boundary_result.thresholds.items()},
-            "gt_intervals": [[int(s), int(e)] for s, e in gt_intervals],
-            "gt_metrics": compute_gt_span_metrics(coarse_frame_spans, gt_intervals),
             "runtime_sec": runtime_sec,
         }
-        (cur_output_dir / "boundary_spans.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json(str(cur_output_dir / "boundary_spans.json"), result)
 
-        # # Run tree pipeline
-        # all_tracks = [track for frame_tracks in sampled_tracks for track in frame_tracks]
-        # all_nodes: list[EventNode] = []
+        brief_summary = {
+            "video_id": video_id,
+            "num_sampled_frames": len(sampled_frame_ids),
+            "num_coarse_spans": len(coarse_frame_spans),
+            "num_final_spans": len(final_spans),
+            "runtime_sec": runtime_sec,
+            "coarse_spans": [
+                {
+                    "start_frame": int(start),
+                    "end_frame": int(end),
+                }
+                for start, end in coarse_frame_spans
+            ],
+            "final_spans": [
+                {
+                    "start_frame": int(span.start_frame),
+                    "end_frame": int(span.end_frame),
+                    "peak_frame": int(span.peak_frame),
+                    "vlm_score": float(span.vlm_score),
+                    "vlm_confidence": float(span.vlm_confidence),
+                    "fused_score": float(span.fused_score),
+                }
+                for span in final_spans
+            ],
+        }
+        write_json(str(cur_output_dir / "summary.json"), brief_summary)
 
-        # if not windows:
-        #     self.logger.warning(
-        #         "No valid windows were built. The video is likely shorter than window_size=%d.",
-        #         int(self.cfg.video.window_size),
-        #     )
-        # elif max(scores, default=0.0) <= 0.0:
-        #     self.logger.warning("All dense scores are non-positive; skipping tree pipeline.")
-        # else:
-        #     all_nodes = self.tree_pipeline.process(
-        #         images=sampled_frame_paths,
-        #         frame_ids=sampled_frame_ids,
-        #         scores=scores,
-        #         all_tracks=all_tracks,
-        #         windows=windows,
-        #         method=self.tree_method,
-        #     )
-        #     self.logger.info(f"Tree pipeline finished with {len(all_nodes)} event nodes.")
         return result

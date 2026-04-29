@@ -13,9 +13,7 @@ import yaml
 #     if str(project_root) not in sys.path:
 #         sys.path.insert(0, str(project_root))
 
-# import all config class
 from src.features.feature_components.scene import SceneFeatureConfig
-from src.proposals.tree_pipeline_components import NodeSelectorConfig, TreeBuildConfig
 from src.proposals.boundary_detector import BoundaryDetectorConfig
 from src.perception.detector_tracker import DetectorTrackerConfig
 from src.vlm.model_loader import VLMConfig
@@ -24,8 +22,6 @@ from src.vlm.model_loader import VLMConfig
 cls_map = {
     "scene_features": SceneFeatureConfig,
     "boundary_detector": BoundaryDetectorConfig,
-    "tree_build_config": TreeBuildConfig,
-    "node_selector": NodeSelectorConfig,
     "perception": DetectorTrackerConfig,
     "vlm": VLMConfig,
 }

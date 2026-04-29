@@ -33,15 +33,15 @@ SCENE_FEATURE_WEIGHTS = {
 FEATURE_Z_DEADZONE = 1.0
 FEATURE_Z_CAP = 8.0
 FEATURE_HIGH_PERCENTILE = 98.0
-GATE_EXPERT_THRESHOLD = 0.25
-GATE_EVIDENCE_THRESHOLD = 0.5
+GATE_EXPERT_THRESHOLD = 0.20
+GATE_EVIDENCE_THRESHOLD = 1.80
 GATE_SIGMOID_K = 6.0
 GATE_TOP_K = 3
 GATE_MEDIAN_WINDOW = 3
-GATE_MIN_EXPERT_CONFIDENCE = 0.05
+GATE_MIN_EXPERT_CONFIDENCE = 0.04
 GATE_MIN_ACTIVE_EXPERTS = 2
-GATE_STRONG_EVIDENCE = 2.0
-GATE_SINGLE_EXPERT_SCALE = 0.25
+GATE_STRONG_EVIDENCE = 3.0
+GATE_SINGLE_EXPERT_SCALE = 0.30
 GATE_BACKGROUND_PERCENTILE = 50.0
 GATE_SHOULDER_PERCENTILE = 80.0
 GATE_PEAK_PROMINENCE = 0.5
@@ -89,8 +89,7 @@ def _median_filter_1d(values: np.ndarray, window: int = GATE_MEDIAN_WINDOW) -> n
 
 
 def _scale_salience(salience: np.ndarray) -> np.ndarray:
-    high = max(float(np.percentile(salience, FEATURE_HIGH_PERCENTILE)), 1e-6)
-    return np.clip(salience / high, 0.0, 1.0).astype(np.float32)
+    return np.clip(salience / max(1e-6, FEATURE_Z_CAP), 0.0, 1.0).astype(np.float32)
 
 
 def _evidence_curves(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -99,8 +98,13 @@ def _evidence_curves(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
         return values, values, values, values
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
-    sigma = max(1e-6, 1.4826 * mad)
-    # z_raw is the expert evidence after a dead zone; short normal jitter stays 0.
+    sigma = 1.4826 * mad
+    if sigma < 1e-6:
+        high = float(np.percentile(values, FEATURE_HIGH_PERCENTILE))
+        # Sparse/discrete features often have MAD=0. Use the upper spread as a
+        # fallback so any nonzero blip does not explode directly to FEATURE_Z_CAP.
+        sigma = max((high - median) / 3.0, 1e-6)
+    # z_raw is expert evidence after a dead zone; short normal jitter stays 0.
     z_raw = np.clip(
         np.maximum((values - median) / sigma - FEATURE_Z_DEADZONE, 0.0),
         0.0,
@@ -260,8 +264,9 @@ def build_window_score_curves(windows: list[WindowFeature]) -> dict[str, np.ndar
         if np.any(selected_sparse_peak_mask)
         else np.zeros((num_windows,), dtype=bool)
     )
+    strong_sparse_peak = sparse_peak_active & (global_evidence >= GATE_STRONG_EVIDENCE)
     weak_single_expert = (active_experts < GATE_MIN_ACTIVE_EXPERTS) & (global_evidence < GATE_STRONG_EVIDENCE)
-    weak_single_expert = weak_single_expert & ~sparse_peak_active
+    weak_single_expert = weak_single_expert & ~strong_sparse_peak
     rho = np.where(weak_single_expert, rho * GATE_SINGLE_EXPERT_SCALE, rho).astype(np.float32)
 
     trigger_score = (rho * np.sum(weights * selected_scores, axis=0)).astype(np.float32)

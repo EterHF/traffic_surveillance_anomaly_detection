@@ -55,8 +55,8 @@ class DetectorTracker:
             **self._track_kwargs(persist=True),
         )
 
-    def track_frame(self, frame: np.ndarray, persist: bool = True):
+    def track_frame(self, frame_or_path: np.ndarray | str, persist: bool = True):
         return self.model.track(
-            source=frame,
+            source=frame_or_path,
             **self._track_kwargs(persist=bool(persist)),
         )

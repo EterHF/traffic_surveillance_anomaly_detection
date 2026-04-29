@@ -4,7 +4,7 @@
 
 当前代码已经形成两条可运行路径：
 
-1. 主干离线流程（`Orchestrator`）：检测跟踪 + 特征打分 + 粗边界候选（事件树后续逻辑当前在入口处默认注释）。
+1. 主干离线流程（`Orchestrator`）：检测跟踪 + 特征打分 + 粗边界候选（span-level VLM 复核当前在入口处默认注释）。
 2. Pure VLM Baseline：纯视觉语言模型窗口化打分，支持逐帧分数与区间输出，并带基础评估指标。
 
 ## 1. 项目目标
@@ -40,8 +40,8 @@ src/
   - 单帧单目标的检测/跟踪实体（bbox、类别、track_id、中心点、面积、可选帧尺寸）。
 - `WindowFeature`
   - 一个滑窗的聚合特征与触发分数 `trigger_score`。
-- `EventNode`
-  - 候选事件树节点：区间索引/帧号、峰值与均值、先验分、VLM 分与融合分。
+- `SpanProposal`
+  - 扁平候选区间：区间索引/帧号、峰值与均值、先验分、VLM 分与融合分。
 - `EvidencePack`
   - VLM 复核所需证据：关键帧路径 + 结构化摘要。
 
@@ -59,7 +59,7 @@ src/
 6. `BoundaryDetector` 产出粗区间 `coarse_spans`。
 7. 输出打分曲线图到结果目录。
 
-说明：事件树细化 + 证据构建 + VLM 复核的调用代码已在 `run_offline` 中预留，但默认被注释。
+说明：span-level 证据构建 + VLM 复核的调用代码已在 `run_offline` 中预留，但默认被注释。
 
 ### 4.2 Pure VLM Baseline（pipeline/pure_vlm_baseline.py）
 
@@ -111,15 +111,15 @@ src/
 
 并支持 Savitzky-Golay 平滑、区间合并、最小长度过滤。
 
-### 6.2 TreePipeline（proposals/tree_pipeline.py）
+### 6.2 refine_spans_with_vlm（proposals/tree_pipeline.py）
 
 逻辑包含：
 
-1. 粗区间 -> coarse nodes
-2. 每个节点构建证据图（montage）
+1. frame-id 粗区间 -> flat span proposals
+2. 每个 span 构建证据图（montage）
 3. 调 VLM 单阶段打分（`build_span_score_prompt`）
 4. 先验与 VLM 分按权重融合
-5. 从 coarse nodes 递归构建事件树
+5. 对阳性 spans 按 frame gap 简单合并
 
 ## 7. VLM 子系统
 
@@ -144,7 +144,7 @@ src/
 - `track_refiner`
 - `scene_features`
 - `boundary_detector`
-- `tree_build_config` / `tree_refine_config`
+- `span_refine_config`
 - `pure_vlm_baseline`
 - `vlm`
 
@@ -218,9 +218,9 @@ python scripts/run_pure_vlm_baseline.py \
 
 ## 11. 代码现状与注意事项
 
-1. `Orchestrator.run_offline` 当前默认仅跑到粗边界检测，事件树 + VLM 细化调用代码在函数内被注释。
-2. `scripts/run_offline.py` 仍按“返回节点列表”打印统计；在当前实现下可能与返回值不一致，需要按你的实际入口方式调整。
-3. 事件树组件中有若干接口依赖（如 `node.span_len()`）与当前 `EventNode` 定义存在不一致；若启用完整树筛选链路，建议先补齐这部分实现。
+1. `Orchestrator.run_offline` 当前默认仅跑到粗边界检测，span-level VLM 细化调用代码在函数内被注释。
+2. `scripts/run_offline.py` 仍按旧实验入口打印统计；在当前实现下可能与返回值不一致，需要按你的实际入口方式调整。
+3. 原层级候选组件已移除，当前候选复核以 flat span 为单位。
 4. 部分模块仍保留 `FIXME` 标记，属于实验阶段参数。
 
 ## 12. 推荐调参顺序
@@ -228,7 +228,7 @@ python scripts/run_pure_vlm_baseline.py \
 1. 先固定 `video.fps_sample` 与 `pure_vlm_baseline.window_size/window_stride`。
 2. 调 `boundary_detector` 的 `peak_expand/min_span_len/merge_gap`，观察候选区间稳定性。
 3. 再调 `OBJECT_FEATURE_WEIGHTS` 与 `SCENE_FEATURE_WEIGHTS`。
-4. 最后再调 `tree_refine_config` 的 `min_confidence/prior_weight/vlm_weight`。
+4. 最后再调 `span_refine_config` 的 `min_confidence/positive_threshold/merge_gap`。
 
 ## 13. 适合二次开发的位置
 

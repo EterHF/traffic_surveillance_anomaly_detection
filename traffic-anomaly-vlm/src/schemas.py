@@ -30,10 +30,10 @@ class WindowFeature(BaseModel):
     trigger_score: float = 0.0
 
 
-class EventNode(BaseModel):
-    """One node in an event tree built from a 1D eventness signal."""
-    node_id: str
-    level: int
+class SpanProposal(BaseModel):
+    """Flat candidate span with optional VLM scoring fields."""
+
+    span_id: str
     start_idx: int
     end_idx: int
     peak_idx: int
@@ -42,15 +42,16 @@ class EventNode(BaseModel):
     peak_frame: int
     eventness_peak: float
     eventness_mean: float
-    span_prior_score: float = 0.0
+    left_gap: int = 0
+    right_gap: int = 0
+    prior_score: float = 0.0
     vlm_score: float = 0.0
     vlm_confidence: float = 0.0
     fused_score: float = 0.0
-    children: list["EventNode"] = Field(default_factory=list)
+    is_positive: bool = False
 
-    
+
 class EvidencePack(BaseModel):
     event_id: str
     keyframe_paths: list[str] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
-

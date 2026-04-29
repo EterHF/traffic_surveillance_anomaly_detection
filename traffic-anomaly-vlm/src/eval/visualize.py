@@ -4,7 +4,7 @@ import cv2
 
 from matplotlib import pyplot as plt
 import numpy as np
-from src.schemas import EventNode
+from src.schemas import SpanProposal
 
 
 def plot_peaks(
@@ -64,85 +64,43 @@ def plot_scores(
     return fig
 
 
-def plot_event_nodes(nodes: list[EventNode], frame_ids: list[int], title: str = "Event_Nodes", output_dir: str = "outputs") -> plt.Figure:
-    def _collect_nodes(input_nodes: list[EventNode]) -> dict[str, EventNode]:
-        by_id: dict[str, EventNode] = {}
-
-        def _walk(node: EventNode) -> None:
-            if node.node_id in by_id:
-                return
-            by_id[node.node_id] = node
-            for child in node.children:
-                _walk(child)
-
-        for node in input_nodes:
-            _walk(node)
-        return by_id
-
-    node_by_id = _collect_nodes(nodes)
-    all_nodes = sorted(
-        node_by_id.values(),
-        key=lambda node: (int(node.level), int(node.start_frame), int(node.end_frame), str(node.node_id)),
-    )
-
+def plot_span_proposals(
+    spans: list[SpanProposal],
+    frame_ids: list[int],
+    title: str = "Span Proposals",
+    output_dir: str = "outputs",
+) -> plt.Figure:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    if not all_nodes:
+    if not spans:
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.text(0.5, 0.5, "No event nodes", ha="center", va="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No span proposals", ha="center", va="center", transform=ax.transAxes)
         ax.set_axis_off()
         fig.suptitle(title)
         plt.tight_layout()
         fig.savefig(output_path / f"{title.replace(' ', '_').lower()}.png")
         return fig
 
-    max_level = max(int(node.level) for node in all_nodes)
-    min_frame = min(frame_ids) if frame_ids else min(int(node.start_frame) for node in all_nodes)
-    max_frame = max(frame_ids) if frame_ids else max(int(node.end_frame) for node in all_nodes)
-    level_ticks = list(range(1, max_level + 1))
-    cmap = plt.cm.get_cmap("tab10", max(2, max_level + 1))
+    ordered = sorted(spans, key=lambda span: (int(span.start_frame), int(span.end_frame)))
+    min_frame = min(frame_ids) if frame_ids else min(int(span.start_frame) for span in ordered)
+    max_frame = max(frame_ids) if frame_ids else max(int(span.end_frame) for span in ordered)
 
-    fig_height = max(4.0, 1.25 * max_level + 1.5)
-    fig, ax = plt.subplots(figsize=(14, fig_height))
-
-    edges: set[tuple[str, str]] = set()
-    for node in all_nodes:
-        for child in node.children:
-            if child.node_id in node_by_id:
-                edges.add((node.node_id, child.node_id))
-
-        if "." in node.node_id:
-            parent_id = node.node_id.rsplit(".", 1)[0]
-            if parent_id in node_by_id:
-                edges.add((parent_id, node.node_id))
-
-    for parent_id, child_id in sorted(edges):
-        parent = node_by_id[parent_id]
-        child = node_by_id[child_id]
-        ax.plot(
-            [float(parent.peak_frame), float(child.peak_frame)],
-            [float(parent.level), float(child.level)],
-            color="0.65",
-            linewidth=1.2,
-            zorder=1,
-        )
-
-    for node in all_nodes:
-        y = float(node.level)
-        color = cmap(int(node.level) % cmap.N)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    for row, span in enumerate(ordered, start=1):
+        color = "#d95f02" if span.is_positive else "#7570b3"
         ax.hlines(
-            y=y,
-            xmin=float(node.start_frame),
-            xmax=float(node.end_frame),
+            y=float(row),
+            xmin=float(span.start_frame),
+            xmax=float(span.end_frame),
             color=color,
             linewidth=8,
             alpha=0.95,
             zorder=2,
         )
         ax.scatter(
-            float(node.peak_frame),
-            y,
+            float(span.peak_frame),
+            float(row),
             s=46,
             color="black",
             edgecolors="white",
@@ -150,12 +108,12 @@ def plot_event_nodes(nodes: list[EventNode], frame_ids: list[int], title: str = 
             zorder=3,
         )
 
-        label = str(node.node_id)
-        if float(node.fused_score) > 0.0:
-            label = f"{label} ({float(node.fused_score):.2f})"
+        label = str(span.span_id)
+        if float(span.fused_score) > 0.0:
+            label = f"{label} ({float(span.fused_score):.2f})"
         ax.text(
-            float(node.start_frame),
-            y - 0.12,
+            float(span.start_frame),
+            float(row) - 0.12,
             label,
             fontsize=9,
             ha="left",
@@ -166,17 +124,19 @@ def plot_event_nodes(nodes: list[EventNode], frame_ids: list[int], title: str = 
 
     ax.set_title(title)
     ax.set_xlabel("Frame ID")
-    ax.set_ylabel("Tree Level")
+    ax.set_ylabel("Span")
     ax.set_xlim(float(min_frame), float(max_frame))
-    ax.set_ylim(max_level + 0.7, 0.3)
-    ax.set_yticks(level_ticks)
-    ax.set_yticklabels([f"L{level}" for level in level_ticks])
+    ax.set_ylim(len(ordered) + 0.7, 0.3)
+    ax.set_yticks(list(range(1, len(ordered) + 1)))
     ax.grid(True, axis="x", linestyle="--", alpha=0.35)
     ax.grid(True, axis="y", linestyle=":", alpha=0.2)
 
     plt.tight_layout()
     fig.savefig(output_path / f"{title.replace(' ', '_').lower()}.png")
     return fig
+
+
+plot_event_nodes = plot_span_proposals
 
 
 def plot_all_subscores(
